@@ -5,12 +5,7 @@ date: "2025-11-21"
 output: html_document
 ---
 
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
-```
-
-
-  ```{r setup, include=FALSE
+```{r setup, include=FALSE
   knitr::opts_chunk$set(echo = TRUE)}
 
 #The purpose of this file is to examin the relationship between two factors of placentation, interdigitation and invasiveness, and life history vairaibles, gestation length, neonate body size, litter size, and interbirth interval. Each of these variables are chosen for their importance in resourse exchange during pregnancy, following the prediction that with an increased intrusiveness of placental interdigitation or invasiveness, which allows for more resource exchange between fetus and gestator, there will be compensation by reducing the intensitiy of the life history variable in question (as in, shorter gestation length, etc.). A fuller version of introduction and conclusions can be found in my data paper.
@@ -1324,3 +1319,4 @@ summary(inter_interval_pgls_laby)
 model_inter_interval$interdigitation <- factor(model_inter_interval$interdigitation, levels = c("Villous", "Trabecular", "Labyrinthine"))
 
 ```
+
