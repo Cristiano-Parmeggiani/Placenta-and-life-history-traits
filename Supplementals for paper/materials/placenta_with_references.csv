@@ -1,4 +1,4 @@
-species,order,common_name,invasivness,interdigitation,Reference link url,,,,,
+species,order,common_name,invasiveness,interdigitation,Reference link url,,,,,
 Chrysochloris_asiatica,Afrosoricida,Cape_golden mole,Hemochorial,Labyrinthine,https://reader.elsevier.com/reader/sd/pii/S0143400409002677?token=CBB6917B39312A819CF69AD406870D174F53F797C1E1015D52E398EFC3415864BF09E79BD1812806D1D626693A8344D34,,,,,
 Echinops_telfairi,Afrosoricida,lesser_hedgehog tenrec,Hemochorial,Labyrinthine,https://genomics.senescence.info/species/entry.php?species=Echinops_telfairi,,,,,
 Hemicentetes_semispinosus,Afrosoricida,lowland_streaked tenrec,Hemochorial,Labyrinthine,https://genomics.senescence.info/species/entry.php?species=Hemicentetes_semispinosus,,,,,
@@ -647,3 +647,4 @@ Trichechus_inunguis,Sirenia,Amazonian_manatee,Endotheliochorial,Labyrinthine,htt
 Trichechus_manatus,Sirenia,West_Indian manatee,Endotheliochorial,Labyrinthine,https://www.semanticscholar.org/paper/Placentation-in-the-Amazonian-manatee-(Trichechus-Carter-Miglino/9dc0558666ba7e53bdf3908a3a907ee06524bca1,,,,,
 Hippopotamus_amphibius,Therapsida,hippopotamus,Epitheliochorial,Villous,,,,,,
 Orycteropus_afer,Tubulidentata,aardvark,Endotheliochorial,Labyrinthine,http://placentation.ucsd.edu/aard.html,,,,https://animaldiversity.org/accounts/Orycteropus_afer/?utm_source=chatgpt.com,
+
