@@ -1,4 +1,4 @@
-Authors: Cristiano Parmeggiani1*, †, Tiffany Pan2, Mary Boyd1, Varun Aravind1, Meghan Forsythe1, Mikayla Johnstone1, Amy M. Boddy†1
+Authors: Cristiano Parmeggiani1*, †, Tiffany Pan2, Mary Boyd1, Varun Aravind1, Meghan Forsythe1, Mikayla Johnstone1, Amy M. Boddy1†
 
 *First Author
 **Corresponding Author
