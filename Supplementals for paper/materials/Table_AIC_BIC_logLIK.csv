@@ -1,0 +1,9 @@
+﻿Model;AIC;BIC;logLik;Lambda;;;;Model;AIC;ΔAIC;BIC;ΔBIC;logLik;ΔlogLIK;Lambda
+ln(Gestation length) ~ invasiveness;20.1933;37.1231;-6.0967;0.9894;;;;ln(Gestation length) ~ invasiveness + ln(longevity);-1.5941;-21.7874;19.5682;-17.5549;5.7970;11.8937;0.9840
+ln(Gestation length) ~ interdigitation;8.2866;25.2164;-0.1433;0.9889;;;;ln(Gestation length) ~ interdigitation + ln(longevity);-12.5431;-20.8297;8.6191;-16.5972;11.2716;11.4148;0.9836
+ln(Neonate over adult) ~ invasiveness;1126.6860;1142.3830;-559.3430;0.9999;;;;ln(Neonate over adult) ~ invasiveness + ln(longevity);1068.9126;-57.7734;1088.5339;-53.8491;-529.4563;29.8867;0.9995
+ln(Neonate over adult) ~ interdigitation;1119.7420;1135.4390;-555.8710;0.9999;;;;ln(Neonate over adult) ~ interdigitation + ln(longevity);1063.4681;-56.2739;1083.0894;-52.3496;-526.7341;29.1369;0.9996
+ln(Litter size) ~ invasiveness;197.0246;213.9544;-94.5123;0.9999;;;;ln(Litter size) ~ invasiveness + ln(longevity);193.9511;-3.0735;215.1133;1.1589;-91.9755;2.5368;0.9951
+ln(Litter size) ~ interdigitation;194.6289;211.5587;-93.3144;0.9993;;;;ln(Litter size) ~ interdigitation + ln(longevity);191.9619;-2.6670;213.1242;1.5655;-90.9810;2.3334;0.9949
+ln(Interbirth interval) ~ invasiveness;-1119.5100;-1102.5800;563.7528;0.9678;;;;ln(Interbirth interval) ~ invasiveness + ln(longevity);-1126.7027;-7.1927;-1105.5404;-2.9604;568.3513;4.5985;0.9388
+ln(Interbirth interval) ~ interdigitation;550.4234;567.3532;-271.2120;0.9397;;;;ln(Interbirth interval) ~ interdigitation + ln(longevity);531.8994;-18.5240;553.0616;-14.2916;-260.9497;10.2623;0.9200
