@@ -46,6 +46,8 @@ Contains all raw data, phylogenetic tree, and supplementary tables
 code/
 Contains the R script used to run all analyses
 
+figures/
+Contains all figures present in the paper
 
 Workflow instructions:
 
