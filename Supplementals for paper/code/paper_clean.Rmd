@@ -61,9 +61,19 @@ library(dplyr)
 
 #First step in the analysis is to visualize the placenta data on a phylogeny.
 
-# Phylogeny 
+#### Phylogeny 
 
+
+#Import Newick tree
+mammal_phy <- ape::read.tree("mammal_tree.nwk")
 mammal_phy$tip.label <- tolower(mammal_phy$tip.label)
+
+#Import datasets
+placenta <- readr::read_csv("placenta.csv")
+gestation_length <- readr::read_csv("gestation_length.csv")
+neonate_body_size <- readr::read_csv("neonate_body_size.csv")
+litter_size <- readr::read_csv("litter_size.csv")
+interbirth_interval <- readr::read_csv("interbirth_interval.csv")
 
 placenta$species <- tolower(placenta$species)
 
@@ -1285,5 +1295,6 @@ summary(inter_interval_pgls_laby)
 model_inter_interval$interdigitation <- factor(model_inter_interval$interdigitation, levels = c("Villous", "Trabecular", "Labyrinthine"))
 
 ```
+
 
 
