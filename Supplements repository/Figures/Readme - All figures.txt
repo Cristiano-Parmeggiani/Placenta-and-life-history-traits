@@ -30,7 +30,7 @@ Phylogeny of 509 mammals included in the study’s data set.
 "placenta-morphology.jpg"
 Diagram of placenta morphology representing invasiveness and interdigitation. 
 
-"ppca biplot merged.png"
+"ppca biplot.png"
 Panel a: Phylogenetically corrected principal component biplot, colored according to placental invasiveness type
 Panel b:Phylogenetically corrected principal component biplot, colored according to placental interdigitation type
 
