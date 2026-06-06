@@ -1,0 +1,3218 @@
+---
+title: "Paper_clean"
+author: "Cristiano parmeggiani"
+date: "2025-11-21"
+output: html_document
+---
+
+```{r setup, include=FALSE
+  knitr::opts_chunk$set(echo = TRUE)}
+
+#The purpose of this file is to examin the relationship between two factors of placentation, interdigitation and invasiveness, and life history vairaibles, gestation length, neonate body size, litter size, and interbirth interval. Each of these variables are chosen for their importance in resourse exchange during pregnancy, following the prediction that with an increased intrusiveness of placental interdigitation or invasiveness, which allows for more resource exchange between fetus and gestator, there will be compensation by reducing the intensitiy of the life history variable in question (as in, shorter gestation length, etc.). A fuller version of introduction and conclusions can be found in the paper.
+
+```
+
+```{r}
+
+# Libraries 
+
+library(tidyverse) #basic data analysis packages
+library(janitor)
+library(ggfortify)
+library(ggpmisc)
+library(ggplot2)
+library(corrplot)
+library(GGally)#graphic packages
+library(paletteer)
+library(patchwork)
+library(ape)#next 4 are for phylogenic correction
+library(geiger)
+library(nlme)
+library(phytools)
+library(ggtree)
+library(caper)
+library(treeio)
+library(tree)
+library(ggrepel)
+library(geiger)
+library(ggnewscale)
+library(phytools)
+library(stringdist)
+library(ggthemes)
+library(multcomp)
+library(broom)
+library(scales) 
+library(emmeans)
+library(purrr)
+library(tidyr)
+library(knitr)
+library(kableExtra)
+library(gridExtra)
+library(grid)
+library(viridis)
+library(tibble)
+library(openxlsx)
+library(rmarkdown)
+library(dplyr)
+
+```
+
+```{r}
+
+#First step in the analysis is to visualize the placenta data on a phylogeny.
+
+#### Phylogeny 
+
+
+#Import Newick tree
+mammal_phy <- ape::read.tree("mammal_tree.nwk")
+mammal_phy$tip.label <- tolower(mammal_phy$tip.label)
+
+#Import datasets
+placenta <- readr::read_csv("placenta.csv")
+gestation_length <- readr::read_csv("gestation_length.csv")
+neonate_body_size <- readr::read_csv("neonate_body_size.csv")
+litter_size <- readr::read_csv("litter_size.csv")
+interbirth_interval <- readr::read_csv("interbirth_interval.csv")
+
+placenta$species <- tolower(placenta$species)
+
+gestree <- prune_tree(gestation_length)
+gestree_female <- prune_tree(gestation_length_female)
+litsizetree <- prune_tree(litsize)
+litsizetree_female <- prune_tree(litsize_female)
+littree <- prune_tree(relative_litter_mass)
+littree_female <- prune_tree(relative_litter_mass_female)
+neotree <- prune_tree(neonate_body_size)
+neotree_female <- prune_tree(neonate_body_size_female)
+intervaltree <- prune_tree(interbirth_interval)
+intervaltree_female <- prune_tree(interbirth_interval_female)
+
+```
+
+```{r}
+
+# 06 — Comparative data and SE preparation -----------------------------------
+
+make_comp_data <- function(data, tree) {
+  data <- data %>%
+    filter(species %in% tree$tip.label) %>%
+    distinct(species, .keep_all = TRUE) %>%
+    as.data.frame()
+  rownames(data) <- NULL
+
+  comp <- comparative.data(
+    phy = tree,
+    data = data,
+    names.col = "species",
+    vcv = FALSE,
+    vcv.dim = 2,
+    na.omit = FALSE,
+    force.root = FALSE,
+    warn.dropped = TRUE
+  )
+
+  if (!"species" %in% colnames(comp$data)) {
+    comp$data$species <- rownames(comp$data)
+  }
+
+  comp$data <- comp$data %>%
+    mutate(
+      invasiveness = factor(invasiveness,
+        levels = c("Epitheliochorial", "Endotheliochorial", "Hemochorial")
+      ),
+      interdigitation = factor(interdigitation,
+        levels = c("Villous", "Trabecular", "Labyrinthine")
+      )
+    )
+
+  comp
+}
+
+comp_phylo_ges <- make_comp_data(gestation_length, gestree)
+comp_phylo_ges_female <- make_comp_data(gestation_length_female, gestree_female)
+comp_phylo_litsize <- make_comp_data(litsize, litsizetree)
+comp_phylo_litsize_female <- make_comp_data(litsize_female, litsizetree_female)
+comp_phylo_lit <- make_comp_data(relative_litter_mass, littree)
+comp_phylo_lit_female <- make_comp_data(relative_litter_mass_female, littree_female)
+comp_phylo_neo <- make_comp_data(neonate_body_size, neotree)
+comp_phylo_neo_female <- make_comp_data(neonate_body_size_female, neotree_female)
+comp_phylo_interval <- make_comp_data(interbirth_interval, intervaltree)
+comp_phylo_interval_female <- make_comp_data(interbirth_interval_female, intervaltree_female)
+
+prepare_model_and_se <- function(response_var,
+                                 predictor_vars,
+                                 data_df,
+                                 se_source_df,
+                                 phylo_obj,
+                                 log_response = TRUE,
+                                 default_se = 0.01) {
+  
+  # --- ensure species column & standardize casing ---
+  if (!"species" %in% names(data_df)) {
+    if ("spp" %in% names(data_df)) {
+      data_df$species <- data_df$spp
+    } else {
+      stop("`species` (or `spp`) column not found in data_df.")
+    }
+  }
+  
+  data_df$species       <- tolower(data_df$species)
+  se_source_df$species  <- tolower(se_source_df$species)
+  phylo_obj$tip.label   <- tolower(phylo_obj$tip.label)
+  
+  # --- keep only species present in the tree ---
+  data_df <- dplyr::filter(data_df, species %in% phylo_obj$tip.label)
+  
+  # --- build per-species SE on the *linear* scale from the source df ---
+  se_df <- se_source_df %>%
+    dplyr::filter(species %in% data_df$species) %>%
+    dplyr::group_by(species) %>%
+    dplyr::summarise(
+      n_obs     = dplyr::n(),
+      sd_resp   = stats::sd(.data[[response_var]], na.rm = TRUE),
+      se_linear = dplyr::if_else(n_obs > 1, sd_resp / sqrt(n_obs), NA_real_),
+      .groups = "drop"
+    )
+  
+  # --- assign default SE for single-observation species ---
+  se_df$se_linear[is.na(se_df$se_linear)] <- default_se
+  
+  # --- join traits + predictors + SEs ---
+  df <- data_df %>%
+    dplyr::select(species, dplyr::all_of(c(response_var, predictor_vars))) %>%
+    dplyr::left_join(se_df[, c("species", "se_linear")], by = "species")
+  
+  # --- if modeling log(response), delta-method SE = SE_linear / response ---
+  if (log_response) {
+    df <- dplyr::filter(df, .data[[response_var]] > 0) # required for logs and delta method
+    df$se_use <- df$se_linear / df[[response_var]]
+  } else {
+    df$se_use <- df$se_linear
+  }
+  
+  # --- make predictors factors if they are categorical ---
+  for (v in predictor_vars) {
+    if (is.character(df[[v]])) df[[v]] <- factor(df[[v]])
+  }
+  
+  # --- drop any rows with NA in response/predictors/SE ---
+  df <- tidyr::drop_na(df, dplyr::all_of(c(response_var, predictor_vars, "se_use")))
+  
+  # --- order by tree tip order and keep spp copy ---
+  df <- df[match(phylo_obj$tip.label, df$species), , drop = FALSE]
+  df <- df[stats::complete.cases(df$species), , drop = FALSE]
+  df$spp <- df$species
+  
+  # --- build a model.frame with na.fail to catch anything early ---
+  form <- stats::as.formula(
+    paste(response_var, "~", paste(c(predictor_vars, "spp"), collapse = " + "))
+  )
+  mf <- stats::model.frame(form, data = df, na.action = stats::na.fail)
+  
+  # --- align SE vector to the model.frame rows ---
+  se_out <- df$se_use[match(mf$spp, df$species)]
+  names(se_out) <- mf$spp
+  
+  # --- final safety checks ---
+  if (anyNA(se_out) || any(!is.finite(se_out)))
+    stop("SE vector contains NA/Inf after alignment & delta method. Check zeros/missing in response or se_source_df.")
+  
+  list(
+    model_frame = mf,
+    se          = se_out
+  )
+}
+
+```
+
+```{r}
+
+# --- Use trait-specific datasets & matching phylogenetic trees ---
+
+trait_datasets <- list(
+  gestation_length = gestation_length,
+  litter_size = litsize,
+  relative_litter_mass = relative_litter_mass,
+  neonate_over_adult = neonate_body_size,
+  interbirth_interval = interbirth_interval
+)
+
+trait_trees <- list(
+  gestation_length = gestree,
+  litter_size = litsizetree,
+  relative_litter_mass = littree,
+  neonate_over_adult = neotree,
+  interbirth_interval = intervaltree
+)
+
+responses <- names(trait_datasets)
+factors   <- c("interdigitation", "invasiveness")
+control_vars <- c("longevity", "body_mass_g")
+results <- list()
+
+for (resp in responses) {
+  df  <- trait_datasets[[resp]]
+  phy <- trait_trees[[resp]]
+  
+  for (fac in factors) {
+    res <- prepare_model_and_se(
+      response_var   = resp,
+      predictor_vars = c(fac, control_vars),
+      data_df        = df,
+      se_source_df   = df,
+      phylo_obj      = phy,
+      log_response   = TRUE
+    )
+    
+    results[[paste(resp, fac, sep = "_")]] <- res
+  }
+}
+
+female_trait_datasets <- list(
+  gestation_length = gestation_length_female,
+  litter_size = litsize_female,
+  relative_litter_mass_female = relative_litter_mass_female,
+  neonate_over_adult = neonate_body_size_female,
+  interbirth_interval = interbirth_interval_female
+)
+
+female_trait_trees <- list(
+  gestation_length = gestree_female,
+  litter_size = litsizetree_female,
+  relative_litter_mass_female = littree_female,
+  neonate_over_adult = neotree_female,
+  interbirth_interval = intervaltree_female
+)
+
+female_control_vars <- c("longevity", "female_body_mass_g")
+female_results <- list()
+
+female_responses <- names(female_trait_datasets)
+
+
+for (resp in female_responses) {
+  df  <- female_trait_datasets[[resp]]
+  phy <- female_trait_trees[[resp]]
+  
+  for (fac in factors) {
+    res <- prepare_model_and_se(
+      response_var   = resp,
+      predictor_vars = c(fac, female_control_vars),
+      data_df        = df,
+      se_source_df   = df,
+      phylo_obj      = phy,
+      log_response   = TRUE
+    )
+    
+    female_results[[paste(resp, fac, sep = "_")]] <- res
+  }
+}
+
+```
+
+```{r}
+
+# SE can now be accessed.
+
+# Gestation length
+model_inter_ges <- results[["gestation_length_interdigitation"]]$model_frame
+se_inter_ges    <- results[["gestation_length_interdigitation"]]$se
+
+model_inv_ges <- results[["gestation_length_invasiveness"]]$model_frame
+se_inv_ges    <- results[["gestation_length_invasiveness"]]$se
+
+model_inter_ges_female <- female_results[["gestation_length_interdigitation"]]$model_frame
+se_inter_ges_female    <- female_results[["gestation_length_interdigitation"]]$se
+
+model_inv_ges_female <- female_results[["gestation_length_invasiveness"]]$model_frame
+se_inv_ges_female    <- female_results[["gestation_length_invasiveness"]]$se
+
+# Litter size
+model_inter_litsize <- results[["litter_size_interdigitation"]]$model_frame
+se_inter_litsize    <- results[["litter_size_interdigitation"]]$se
+
+model_inv_litsize <- results[["litter_size_invasiveness"]]$model_frame
+se_inv_litsize    <- results[["litter_size_invasiveness"]]$se
+
+model_inter_litsize_female <- female_results[["litter_size_interdigitation"]]$model_frame
+se_inter_litsize_female    <- female_results[["litter_size_interdigitation"]]$se
+
+model_inv_litsize_female <- female_results[["litter_size_invasiveness"]]$model_frame
+se_inv_litsize_female    <- female_results[["litter_size_invasiveness"]]$se
+
+# Litter mass
+model_inter_litter <- results[["relative_litter_mass_interdigitation"]]$model_frame
+se_inter_litter    <- results[["relative_litter_mass_interdigitation"]]$se
+
+model_inv_litter <- results[["relative_litter_mass_invasiveness"]]$model_frame
+se_inv_litter    <- results[["relative_litter_mass_invasiveness"]]$se
+
+model_inter_litter_female <- female_results[["relative_litter_mass_female_interdigitation"]]$model_frame
+se_inter_litter_female    <- female_results[["relative_litter_mass_female_interdigitation"]]$se
+
+model_inv_litter_female <- female_results[["relative_litter_mass_female_invasiveness"]]$model_frame
+se_inv_litter_female    <- female_results[["relative_litter_mass_female_invasiveness"]]$se
+
+# Neonate body weight / adult body weight
+model_inter_neo <- results[["neonate_over_adult_interdigitation"]]$model_frame
+se_inter_neo    <- results[["neonate_over_adult_interdigitation"]]$se
+
+model_inv_neo <- results[["neonate_over_adult_invasiveness"]]$model_frame
+se_inv_neo    <- results[["neonate_over_adult_invasiveness"]]$se
+
+model_inter_neo_female <- female_results[["neonate_over_adult_interdigitation"]]$model_frame
+se_inter_neo_female    <- female_results[["neonate_over_adult_interdigitation"]]$se
+
+model_inv_neo_female <- female_results[["neonate_over_adult_invasiveness"]]$model_frame
+se_inv_neo_female    <- female_results[["neonate_over_adult_invasiveness"]]$se
+
+# Interbirth interval
+model_inter_interval <- results[["interbirth_interval_interdigitation"]]$model_frame
+se_inter_interval    <- results[["interbirth_interval_interdigitation"]]$se
+
+model_inv_interval <- results[["interbirth_interval_invasiveness"]]$model_frame
+se_inv_interval    <- results[["interbirth_interval_invasiveness"]]$se
+
+model_inter_interval_female <- female_results[["interbirth_interval_interdigitation"]]$model_frame
+se_inter_interval_female    <- female_results[["interbirth_interval_interdigitation"]]$se
+
+model_inv_interval_female <- female_results[["interbirth_interval_invasiveness"]]$model_frame
+se_inv_interval_female    <- female_results[["interbirth_interval_invasiveness"]]$se
+
+```
+
+```{r PGLS function}
+
+
+library(nlme)
+library(rms)
+library(phytools)
+library(tidyverse)
+library(geiger)
+library(ape)
+library(caper)
+library(stringr)
+
+modPgls.SEy = function (model, data, corClass = corBrownian, tree, se = NULL, 
+                        method = c("REML", "ML"), interval = c(0, 1000), corClassValue=1, sig2e=NULL, ...) 
+{
+  Call <- match.call()
+  corfunc <- corClass
+  spp <- rownames(data)
+  data <- cbind(data, spp)
+  if (is.null(se)) 
+    se <- setNames(rep(0, Ntip(tree)), tree$tip.label)[spp]
+  else se <- se[spp]
+  
+  lk <- function(sig2e, data, tree, model, ve, corfunc, spp) {
+    tree$edge.length <- tree$edge.length * sig2e
+    ii <- sapply(1:Ntip(tree), function(x, e) which(e == 
+                                                      x), e = tree$edge[, 2])
+    tree$edge.length[ii] <- tree$edge.length[ii] + ve[tree$tip.label]
+    vf <- diag(vcv(tree))[spp]
+    w <- varFixed(~vf)
+    COR <- corfunc(corClassValue, tree, form = ~spp, ...)
+    fit <- gls(model, data = cbind(data, vf), correlation = COR, 
+               method = method, weights = w)
+    -logLik(fit)
+  }
+  
+  if (is.null(sig2e)) {
+    fit <- optimize(lk, interval = interval, data = data, tree = tree, 
+                    model = model, ve = se^2, corfunc = corfunc, spp = spp)
+    sig2e=fit$minimum
+  }
+  
+  tree$edge.length <- tree$edge.length * sig2e
+  ii <- sapply(1:Ntip(tree), function(x, e) which(e == x), 
+               e = tree$edge[, 2])
+  tree$edge.length[ii] <- tree$edge.length[ii] + se[tree$tip.label]^2
+  vf <- diag(vcv(tree))[spp]
+  w <- varFixed(~vf)
+  obj <- gls(model, data = cbind(data, vf), correlation = corfunc(corClassValue, 
+                                                                  tree, form = ~spp, ...), weights = w, method = method)
+  obj$call <- Call
+  obj$sig2e <- sig2e
+  obj
+}
+
+#Internal function
+pglsSEyPagelToOptimizeLambda=function(lambda,model,data,tree,...) {
+  -logLik(modPgls.SEy(model=model,data=data,tree=tree,corClassValue=lambda,corClass=corPagel,fixed=T,...)) #Returns -logLikelihood of the pgls.SEy model with lambda fixed to the value of the lambda argument. sig2e will be optimized within modPgls.SEy unless given as an argument here
+}
+
+#Function intended for users
+pglsSEyPagel=function(model, data, tree, lambdaInterval=c(0,1),...){
+  optimizedModel=optimize(pglsSEyPagelToOptimizeLambda,lambdaInterval,model=model,data=data,tree=tree,...) #Optimizes lambda in the lambdaInterval using the pglsSEyPagelToOptimizeLambda function
+  return(modPgls.SEy(model=model,data=data,tree=tree,corClass=corPagel,fixed=T,corClassValue=optimizedModel$minimum,...)) #Returns the final model fit
+}
+
+```
+
+```{r}
+
+model_inv_ges <- as.data.frame(model_inv_ges)
+rownames(model_inv_ges) <- model_inv_ges$spp
+se_inv_ges <- rep(0.01, nrow(model_inv_ges))
+names(se_inv_ges) <- rownames(model_inv_ges)
+
+model_inter_ges <- as.data.frame(model_inter_ges)
+rownames(model_inter_ges) <- model_inter_ges$spp
+se_inter_ges <- rep(0.01, nrow(model_inter_ges))
+names(se_inter_ges) <- rownames(model_inter_ges)
+
+model_inv_litter <- as.data.frame(model_inv_litter)
+rownames(model_inv_litter) <- model_inv_litter$spp
+se_inv_litter <- rep(0.01, nrow(model_inv_litter))
+names(se_inv_litter) <- rownames(model_inv_litter)
+
+model_inter_litter <- as.data.frame(model_inter_litter)
+rownames(model_inter_litter) <- model_inter_litter$spp
+se_inter_litter <- rep(0.01, nrow(model_inter_litter))
+names(se_inter_litter) <- rownames(model_inter_litter)
+
+model_inv_interval <- as.data.frame(model_inv_interval)
+rownames(model_inv_interval) <- model_inv_interval$spp
+se_inv_interval <- rep(0.01, nrow(model_inv_interval))
+names(se_inv_interval) <- rownames(model_inv_interval)
+
+model_inter_interval <- as.data.frame(model_inter_interval)
+rownames(model_inter_interval) <- model_inter_interval$spp
+se_inter_interval <- rep(0.01, nrow(model_inter_interval))
+names(se_inter_interval) <- rownames(model_inter_interval)
+
+model_inv_litsize <- as.data.frame(model_inv_litsize)
+rownames(model_inv_litsize) <- model_inv_litsize$spp
+se_inv_litsize <- rep(0.01, nrow(model_inv_litsize))
+names(se_inv_litsize) <- rownames(model_inv_litsize)
+
+model_inter_litsize <- as.data.frame(model_inter_litsize)
+rownames(model_inter_litsize) <- model_inter_litsize$spp
+se_inter_litsize <- rep(0.01, nrow(model_inter_litsize))
+names(se_inter_litsize) <- rownames(model_inter_litsize)
+
+model_inv_litsize <- as.data.frame(model_inv_litsize)
+rownames(model_inv_litsize) <- model_inv_litsize$spp
+se_inv_litsize <- rep(0.01, nrow(model_inv_litsize))
+names(se_inv_litsize) <- rownames(model_inv_litsize)
+
+model_inter_neo <- as.data.frame(model_inter_neo)
+rownames(model_inter_neo) <- model_inter_neo$spp
+se_inter_neo <- rep(0.01, nrow(model_inter_neo))
+names(se_inter_neo) <- rownames(model_inter_neo)
+
+model_inv_neo <- as.data.frame(model_inv_neo)
+rownames(model_inv_neo) <- model_inv_neo$spp
+se_inv_neo <- rep(0.01, nrow(model_inv_neo))
+names(se_inv_neo) <- rownames(model_inv_neo)
+
+
+
+# Female body mass subsets: gestation length
+model_inv_ges_female <- as.data.frame(model_inv_ges_female)
+rownames(model_inv_ges_female) <- model_inv_ges_female$spp
+se_inv_ges_female <- rep(0.01, nrow(model_inv_ges_female))
+names(se_inv_ges_female) <- rownames(model_inv_ges_female)
+
+model_inter_ges_female <- as.data.frame(model_inter_ges_female)
+rownames(model_inter_ges_female) <- model_inter_ges_female$spp
+se_inter_ges_female <- rep(0.01, nrow(model_inter_ges_female))
+names(se_inter_ges_female) <- rownames(model_inter_ges_female)
+
+
+# Female body mass subsets: interbirth interval
+model_inv_interval_female <- as.data.frame(model_inv_interval_female)
+rownames(model_inv_interval_female) <- model_inv_interval_female$spp
+se_inv_interval_female <- rep(0.01, nrow(model_inv_interval_female))
+names(se_inv_interval_female) <- rownames(model_inv_interval_female)
+
+model_inter_interval_female <- as.data.frame(model_inter_interval_female)
+rownames(model_inter_interval_female) <- model_inter_interval_female$spp
+se_inter_interval_female <- rep(0.01, nrow(model_inter_interval_female))
+names(se_inter_interval_female) <- rownames(model_inter_interval_female)
+
+
+# Female body mass subsets: litter mass
+model_inv_litter_female <- as.data.frame(model_inv_litter_female)
+rownames(model_inv_litter_female) <- model_inv_litter_female$spp
+se_inv_litter_female <- rep(0.01, nrow(model_inv_litter_female))
+names(se_inv_litter_female) <- rownames(model_inv_litter_female)
+
+model_inter_litter_female <- as.data.frame(model_inter_litter_female)
+rownames(model_inter_litter_female) <- model_inter_litter_female$spp
+se_inter_litter_female <- rep(0.01, nrow(model_inter_litter_female))
+names(se_inter_litter_female) <- rownames(model_inter_litter_female)
+
+
+# Female body mass subsets: litter size
+model_inv_litsize_female <- as.data.frame(model_inv_litsize_female)
+rownames(model_inv_litsize_female) <- model_inv_litsize_female$spp
+se_inv_litsize_female <- rep(0.01, nrow(model_inv_litsize_female))
+names(se_inv_litsize_female) <- rownames(model_inv_litsize_female)
+
+model_inter_litsize_female <- as.data.frame(model_inter_litsize_female)
+rownames(model_inter_litsize_female) <- model_inter_litsize_female$spp
+se_inter_litsize_female <- rep(0.01, nrow(model_inter_litsize_female))
+names(se_inter_litsize_female) <- rownames(model_inter_litsize_female)
+
+
+# Female body mass subsets: neonate body size
+model_inv_neo_female <- as.data.frame(model_inv_neo_female)
+rownames(model_inv_neo_female) <- model_inv_neo_female$spp
+se_inv_neo_female <- rep(0.01, nrow(model_inv_neo_female))
+names(se_inv_neo_female) <- rownames(model_inv_neo_female)
+
+model_inter_neo_female <- as.data.frame(model_inter_neo_female)
+rownames(model_inter_neo_female) <- model_inter_neo_female$spp
+se_inter_neo_female <- rep(0.01, nrow(model_inter_neo_female))
+names(se_inter_neo_female) <- rownames(model_inter_neo_female)
+
+
+
+
+
+```
+
+```{r gestation_length ~ invasiveness}
+
+##GESTATION LENGTH
+
+# Default factor with original reference
+model_inv_ges$invasiveness <- factor(model_inv_ges$invasiveness, levels = c("Epitheliochorial", "Endotheliochorial", "Hemochorial"))
+
+# Log transform variables
+model_inv_ges$gestation_length <- log(model_inv_ges$gestation_length)
+model_inv_ges$longevity <- log(model_inv_ges$longevity)
+model_inv_ges$body_mass_g <- log(model_inv_ges$body_mass_g)
+
+### NO COVARIATES
+# Model 1: reference = Epitheliochorial
+invas_ges_none_pgls_epi <- pglsSEyPagel(
+  gestation_length ~ invasiveness,
+  data = model_inv_ges,
+  tree = comp_phylo_ges$phy,
+  se = se_inv_ges,
+  method = "ML"
+)
+summary(invas_ges_none_pgls_epi)
+
+model_inv_ges$invasiveness <- relevel(model_inv_ges$invasiveness, ref = "Endotheliochorial")
+
+# Model 2: reference = Endotheliochorial
+invas_ges_none_pgls_endo <- pglsSEyPagel(
+  gestation_length ~ invasiveness,
+  data = model_inv_ges,
+  tree = comp_phylo_ges$phy,
+  se = se_inv_ges,
+  method = "ML"
+)
+summary(invas_ges_none_pgls_endo)
+
+# Reset
+model_inv_ges$invasiveness <- factor(model_inv_ges$invasiveness, levels = c("Epitheliochorial", "Endotheliochorial", "Hemochorial"))
+
+### LONGEVITY ONLY
+# Model 1: reference = Epitheliochorial
+invas_ges_long_pgls_epi <- pglsSEyPagel(
+  gestation_length ~ invasiveness + longevity,
+  data = model_inv_ges,
+  tree = comp_phylo_ges$phy,
+  se = se_inv_ges,
+  method = "ML"
+)
+summary(invas_ges_long_pgls_epi)
+
+model_inv_ges$invasiveness <- relevel(model_inv_ges$invasiveness, ref = "Endotheliochorial")
+
+# Model 2: reference = Endotheliochorial
+invas_ges_long_pgls_endo <- pglsSEyPagel(
+  gestation_length ~ invasiveness + longevity,
+  data = model_inv_ges,
+  tree = comp_phylo_ges$phy,
+  se = se_inv_ges,
+  method = "ML"
+)
+summary(invas_ges_long_pgls_endo)
+
+# Reset
+model_inv_ges$invasiveness <- factor(model_inv_ges$invasiveness, levels = c("Epitheliochorial", "Endotheliochorial", "Hemochorial"))
+
+### BODY MASS ONLY
+# Model 1: reference = Epitheliochorial
+invas_ges_adult_pgls_epi <- pglsSEyPagel(
+  gestation_length ~ invasiveness + body_mass_g,
+  data = model_inv_ges,
+  tree = comp_phylo_ges$phy,
+  se = se_inv_ges,
+  method = "ML"
+)
+summary(invas_ges_adult_pgls_epi)
+
+model_inv_ges$invasiveness <- relevel(model_inv_ges$invasiveness, ref = "Endotheliochorial")
+
+# Model 2: reference = Endotheliochorial
+invas_ges_adult_pgls_endo <- pglsSEyPagel(
+  gestation_length ~ invasiveness + body_mass_g,
+  data = model_inv_ges,
+  tree = comp_phylo_ges$phy,
+  se = se_inv_ges,
+  method = "ML"
+)
+summary(invas_ges_adult_pgls_endo)
+
+# Reset
+model_inv_ges$invasiveness <- factor(model_inv_ges$invasiveness, levels = c("Epitheliochorial", "Endotheliochorial", "Hemochorial"))
+
+### BOTH COVARIATES
+# Model 1: reference = Epitheliochorial
+invas_ges_both_pgls_epi <- pglsSEyPagel(
+  gestation_length ~ invasiveness + longevity + body_mass_g,
+  data = model_inv_ges,
+  tree = comp_phylo_ges$phy,
+  se = se_inv_ges,
+  method = "ML"
+)
+summary(invas_ges_both_pgls_epi)
+
+model_inv_ges$invasiveness <- relevel(model_inv_ges$invasiveness, ref = "Endotheliochorial")
+
+# Model 2: reference = Endotheliochorial
+invas_ges_both_pgls_endo <- pglsSEyPagel(
+  gestation_length ~ invasiveness + longevity + body_mass_g,
+  data = model_inv_ges,
+  tree = comp_phylo_ges$phy,
+  se = se_inv_ges,
+  method = "ML"
+)
+summary(invas_ges_both_pgls_endo)
+
+# Reset
+model_inv_ges$invasiveness <- factor(model_inv_ges$invasiveness, levels = c("Epitheliochorial", "Endotheliochorial", "Hemochorial"))
+
+```
+
+```{r gestation_length ~ interdigitation}
+
+##GESTATION LENGTH
+
+# Default factor with original reference
+model_inter_ges$interdigitation <- factor(model_inter_ges$interdigitation, levels = c("Villous", "Trabecular", "Labyrinthine"))
+
+# Log transform variables
+model_inter_ges$gestation_length <- log(model_inter_ges$gestation_length)
+model_inter_ges$longevity <- log(model_inter_ges$longevity)
+model_inter_ges$body_mass_g <- log(model_inter_ges$body_mass_g)
+
+### NO COVARIATES
+# Model 1: reference = Villous
+inter_ges_none_pgls_vil <- pglsSEyPagel(
+  gestation_length ~ interdigitation,
+  data = model_inter_ges,
+  tree = comp_phylo_ges$phy,
+  se = se_inter_ges,
+  method = "ML"
+)
+summary(inter_ges_none_pgls_vil)
+
+model_inter_ges$interdigitation <- relevel(model_inter_ges$interdigitation, ref = "Trabecular")
+
+# Model 2: reference = Trabecular
+inter_ges_none_pgls_trab <- pglsSEyPagel(
+  gestation_length ~ interdigitation,
+  data = model_inter_ges,
+  tree = comp_phylo_ges$phy,
+  se = se_inter_ges,
+  method = "ML"
+)
+summary(inter_ges_none_pgls_trab)
+
+# Reset
+model_inter_ges$interdigitation <- factor(model_inter_ges$interdigitation, levels = c("Villous", "Trabecular", "Labyrinthine"))
+
+### LONGEVITY ONLY
+# Model 1: reference = Villous
+inter_ges_long_pgls_vil <- pglsSEyPagel(
+  gestation_length ~ interdigitation + longevity,
+  data = model_inter_ges,
+  tree = comp_phylo_ges$phy,
+  se = se_inter_ges,
+  method = "ML"
+)
+summary(inter_ges_long_pgls_vil)
+
+model_inter_ges$interdigitation <- relevel(model_inter_ges$interdigitation, ref = "Trabecular")
+
+# Model 2: reference = Trabecular
+inter_ges_long_pgls_trab <- pglsSEyPagel(
+  gestation_length ~ interdigitation + longevity,
+  data = model_inter_ges,
+  tree = comp_phylo_ges$phy,
+  se = se_inter_ges,
+  method = "ML"
+)
+summary(inter_ges_long_pgls_trab)
+
+# Reset
+model_inter_ges$interdigitation <- factor(model_inter_ges$interdigitation, levels = c("Villous", "Trabecular", "Labyrinthine"))
+
+### BODY MASS ONLY
+# Model 1: reference = Villous
+inter_ges_adult_pgls_vil <- pglsSEyPagel(
+  gestation_length ~ interdigitation + body_mass_g,
+  data = model_inter_ges,
+  tree = comp_phylo_ges$phy,
+  se = se_inter_ges,
+  method = "ML"
+)
+summary(inter_ges_adult_pgls_vil)
+
+model_inter_ges$interdigitation <- relevel(model_inter_ges$interdigitation, ref = "Trabecular")
+
+# Model 2: reference = Trabecular
+inter_ges_adult_pgls_trab <- pglsSEyPagel(
+  gestation_length ~ interdigitation + body_mass_g,
+  data = model_inter_ges,
+  tree = comp_phylo_ges$phy,
+  se = se_inter_ges,
+  method = "ML"
+)
+summary(inter_ges_adult_pgls_trab)
+
+# Reset
+model_inter_ges$interdigitation <- factor(model_inter_ges$interdigitation, levels = c("Villous", "Trabecular", "Labyrinthine"))
+
+### BOTH COVARIATES
+# Model 1: reference = Villous
+inter_ges_both_pgls_vil <- pglsSEyPagel(
+  gestation_length ~ interdigitation + longevity + body_mass_g,
+  data = model_inter_ges,
+  tree = comp_phylo_ges$phy,
+  se = se_inter_ges,
+  method = "ML"
+)
+summary(inter_ges_both_pgls_vil)
+
+model_inter_ges$interdigitation <- relevel(model_inter_ges$interdigitation, ref = "Trabecular")
+
+# Model 2: reference = Trabecular
+inter_ges_both_pgls_trab <- pglsSEyPagel(
+  gestation_length ~ interdigitation + longevity + body_mass_g,
+  data = model_inter_ges,
+  tree = comp_phylo_ges$phy,
+  se = se_inter_ges,
+  method = "ML"
+)
+summary(inter_ges_both_pgls_trab)
+
+# Reset
+model_inter_ges$interdigitation <- factor(model_inter_ges$interdigitation, levels = c("Villous", "Trabecular", "Labyrinthine"))
+
+```
+
+```{r litter_size ~ invasiveness}
+
+##LITTER SIZE
+
+# Default factor with original reference
+model_inv_litsize$invasiveness <- factor(model_inv_litsize$invasiveness, levels = c("Epitheliochorial", "Endotheliochorial", "Hemochorial"))
+
+# Log transform variables
+model_inv_litsize$litter_size <- log(model_inv_litsize$litter_size)
+model_inv_litsize$longevity <- log(model_inv_litsize$longevity)
+model_inv_litsize$body_mass_g <- log(model_inv_litsize$body_mass_g)
+
+### NO COVARIATES
+# Model 1: reference = Epitheliochorial
+invas_litsize_none_pgls_epi <- pglsSEyPagel(
+  litter_size ~ invasiveness,
+  data = model_inv_litsize,
+  tree = comp_phylo_litsize$phy,
+  se = se_inv_litsize,
+  method = "ML"
+)
+summary(invas_litsize_none_pgls_epi)
+
+model_inv_litsize$invasiveness <- relevel(model_inv_litsize$invasiveness, ref = "Endotheliochorial")
+
+# Model 2: reference = Endotheliochorial
+invas_litsize_none_pgls_endo <- pglsSEyPagel(
+  litter_size ~ invasiveness,
+  data = model_inv_litsize,
+  tree = comp_phylo_litsize$phy,
+  se = se_inv_litsize,
+  method = "ML"
+)
+summary(invas_litsize_none_pgls_endo)
+
+# Reset
+model_inv_litsize$invasiveness <- factor(model_inv_litsize$invasiveness, levels = c("Epitheliochorial", "Endotheliochorial", "Hemochorial"))
+
+### LONGEVITY ONLY
+# Model 1: reference = Epitheliochorial
+invas_litsize_long_pgls_epi <- pglsSEyPagel(
+  litter_size ~ invasiveness + longevity,
+  data = model_inv_litsize,
+  tree = comp_phylo_litsize$phy,
+  se = se_inv_litsize,
+  method = "ML"
+)
+summary(invas_litsize_long_pgls_epi)
+
+model_inv_litsize$invasiveness <- relevel(model_inv_litsize$invasiveness, ref = "Endotheliochorial")
+
+# Model 2: reference = Endotheliochorial
+invas_litsize_long_pgls_endo <- pglsSEyPagel(
+  litter_size ~ invasiveness + longevity,
+  data = model_inv_litsize,
+  tree = comp_phylo_litsize$phy,
+  se = se_inv_litsize,
+  method = "ML"
+)
+summary(invas_litsize_long_pgls_endo)
+
+# Reset
+model_inv_litsize$invasiveness <- factor(model_inv_litsize$invasiveness, levels = c("Epitheliochorial", "Endotheliochorial", "Hemochorial"))
+
+### BODY MASS ONLY
+# Model 1: reference = Epitheliochorial
+invas_litsize_adult_pgls_epi <- pglsSEyPagel(
+  litter_size ~ invasiveness + body_mass_g,
+  data = model_inv_litsize,
+  tree = comp_phylo_litsize$phy,
+  se = se_inv_litsize,
+  method = "ML"
+)
+summary(invas_litsize_adult_pgls_epi)
+
+model_inv_litsize$invasiveness <- relevel(model_inv_litsize$invasiveness, ref = "Endotheliochorial")
+
+# Model 2: reference = Endotheliochorial
+invas_litsize_adult_pgls_endo <- pglsSEyPagel(
+  litter_size ~ invasiveness + body_mass_g,
+  data = model_inv_litsize,
+  tree = comp_phylo_litsize$phy,
+  se = se_inv_litsize,
+  method = "ML"
+)
+summary(invas_litsize_adult_pgls_endo)
+
+# Reset
+model_inv_litsize$invasiveness <- factor(model_inv_litsize$invasiveness, levels = c("Epitheliochorial", "Endotheliochorial", "Hemochorial"))
+
+### BOTH COVARIATES
+# Model 1: reference = Epitheliochorial
+invas_litsize_both_pgls_epi <- pglsSEyPagel(
+  litter_size ~ invasiveness + longevity + body_mass_g,
+  data = model_inv_litsize,
+  tree = comp_phylo_litsize$phy,
+  se = se_inv_litsize,
+  method = "ML"
+)
+summary(invas_litsize_both_pgls_epi)
+
+model_inv_litsize$invasiveness <- relevel(model_inv_litsize$invasiveness, ref = "Endotheliochorial")
+
+# Model 2: reference = Endotheliochorial
+invas_litsize_both_pgls_endo <- pglsSEyPagel(
+  litter_size ~ invasiveness + longevity + body_mass_g,
+  data = model_inv_litsize,
+  tree = comp_phylo_litsize$phy,
+  se = se_inv_litsize,
+  method = "ML"
+)
+summary(invas_litsize_both_pgls_endo)
+
+# Reset
+model_inv_litsize$invasiveness <- factor(model_inv_litsize$invasiveness, levels = c("Epitheliochorial", "Endotheliochorial", "Hemochorial"))
+
+```
+
+```{r litter_size ~ interdigitation}
+
+##LITTER SIZE
+
+# Default factor with original reference
+model_inter_litsize$interdigitation <- factor(model_inter_litsize$interdigitation, levels = c("Villous", "Trabecular", "Labyrinthine"))
+
+# Log transform variables
+model_inter_litsize$litter_size <- log(model_inter_litsize$litter_size)
+model_inter_litsize$longevity <- log(model_inter_litsize$longevity)
+model_inter_litsize$body_mass_g <- log(model_inter_litsize$body_mass_g)
+
+### NO COVARIATES
+# Model 1: reference = Villous
+inter_litsize_none_pgls_vil <- pglsSEyPagel(
+  litter_size ~ interdigitation,
+  data = model_inter_litsize,
+  tree = comp_phylo_litsize$phy,
+  se = se_inter_litsize,
+  method = "ML"
+)
+summary(inter_litsize_none_pgls_vil)
+
+model_inter_litsize$interdigitation <- relevel(model_inter_litsize$interdigitation, ref = "Trabecular")
+
+# Model 2: reference = Trabecular
+inter_litsize_none_pgls_trab <- pglsSEyPagel(
+  litter_size ~ interdigitation,
+  data = model_inter_litsize,
+  tree = comp_phylo_litsize$phy,
+  se = se_inter_litsize,
+  method = "ML"
+)
+summary(inter_litsize_none_pgls_trab)
+
+# Reset
+model_inter_litsize$interdigitation <- factor(model_inter_litsize$interdigitation, levels = c("Villous", "Trabecular", "Labyrinthine"))
+
+### LONGEVITY ONLY
+# Model 1: reference = Villous
+inter_litsize_long_pgls_vil <- pglsSEyPagel(
+  litter_size ~ interdigitation + longevity,
+  data = model_inter_litsize,
+  tree = comp_phylo_litsize$phy,
+  se = se_inter_litsize,
+  method = "ML"
+)
+summary(inter_litsize_long_pgls_vil)
+
+model_inter_litsize$interdigitation <- relevel(model_inter_litsize$interdigitation, ref = "Trabecular")
+
+# Model 2: reference = Trabecular
+inter_litsize_long_pgls_trab <- pglsSEyPagel(
+  litter_size ~ interdigitation + longevity,
+  data = model_inter_litsize,
+  tree = comp_phylo_litsize$phy,
+  se = se_inter_litsize,
+  method = "ML"
+)
+summary(inter_litsize_long_pgls_trab)
+
+# Reset
+model_inter_litsize$interdigitation <- factor(model_inter_litsize$interdigitation, levels = c("Villous", "Trabecular", "Labyrinthine"))
+
+### BODY MASS ONLY
+# Model 1: reference = Villous
+inter_litsize_adult_pgls_vil <- pglsSEyPagel(
+  litter_size ~ interdigitation + body_mass_g,
+  data = model_inter_litsize,
+  tree = comp_phylo_litsize$phy,
+  se = se_inter_litsize,
+  method = "ML"
+)
+summary(inter_litsize_adult_pgls_vil)
+
+model_inter_litsize$interdigitation <- relevel(model_inter_litsize$interdigitation, ref = "Trabecular")
+
+# Model 2: reference = Trabecular
+inter_litsize_adult_pgls_trab <- pglsSEyPagel(
+  litter_size ~ interdigitation + body_mass_g,
+  data = model_inter_litsize,
+  tree = comp_phylo_litsize$phy,
+  se = se_inter_litsize,
+  method = "ML"
+)
+summary(inter_litsize_adult_pgls_trab)
+
+# Reset
+model_inter_litsize$interdigitation <- factor(model_inter_litsize$interdigitation, levels = c("Villous", "Trabecular", "Labyrinthine"))
+
+### BOTH COVARIATES
+# Model 1: reference = Villous
+inter_litsize_both_pgls_vil <- pglsSEyPagel(
+  litter_size ~ interdigitation + longevity + body_mass_g,
+  data = model_inter_litsize,
+  tree = comp_phylo_litsize$phy,
+  se = se_inter_litsize,
+  method = "ML"
+)
+summary(inter_litsize_both_pgls_vil)
+
+model_inter_litsize$interdigitation <- relevel(model_inter_litsize$interdigitation, ref = "Trabecular")
+
+# Model 2: reference = Trabecular
+inter_litsize_both_pgls_trab <- pglsSEyPagel(
+  litter_size ~ interdigitation + longevity + body_mass_g,
+  data = model_inter_litsize,
+  tree = comp_phylo_litsize$phy,
+  se = se_inter_litsize,
+  method = "ML"
+)
+summary(inter_litsize_both_pgls_trab)
+
+# Reset
+model_inter_litsize$interdigitation <- factor(model_inter_litsize$interdigitation, levels = c("Villous", "Trabecular", "Labyrinthine"))
+
+```
+
+```{r relative_litter_mass ~ invasiveness}
+
+##LITTER MASS
+
+# Default factor with original reference
+model_inv_litter$invasiveness <- factor(model_inv_litter$invasiveness, levels = c("Epitheliochorial", "Endotheliochorial", "Hemochorial"))
+
+# Log transform variables
+model_inv_litter$relative_litter_mass <- log(model_inv_litter$relative_litter_mass)
+model_inv_litter$longevity <- log(model_inv_litter$longevity)
+model_inv_litter$body_mass_g <- log(model_inv_litter$body_mass_g)
+
+### NO COVARIATES
+# Model 1: reference = Epitheliochorial
+invas_lit_none_pgls_epi <- pglsSEyPagel(
+  relative_litter_mass ~ invasiveness,
+  data = model_inv_litter,
+  tree = comp_phylo_lit$phy,
+  se = se_inv_litter,
+  method = "ML"
+)
+summary(invas_lit_none_pgls_epi)
+
+model_inv_litter$invasiveness <- relevel(model_inv_litter$invasiveness, ref = "Endotheliochorial")
+
+# Model 2: reference = Endotheliochorial
+invas_lit_none_pgls_endo <- pglsSEyPagel(
+  relative_litter_mass ~ invasiveness,
+  data = model_inv_litter,
+  tree = comp_phylo_lit$phy,
+  se = se_inv_litter,
+  method = "ML"
+)
+summary(invas_lit_none_pgls_endo)
+
+# Reset
+model_inv_litter$invasiveness <- factor(model_inv_litter$invasiveness, levels = c("Epitheliochorial", "Endotheliochorial", "Hemochorial"))
+
+### LONGEVITY ONLY
+# Model 1: reference = Epitheliochorial
+invas_lit_long_pgls_epi <- pglsSEyPagel(
+  relative_litter_mass ~ invasiveness + longevity,
+  data = model_inv_litter,
+  tree = comp_phylo_lit$phy,
+  se = se_inv_litter,
+  method = "ML"
+)
+summary(invas_lit_long_pgls_epi)
+
+model_inv_litter$invasiveness <- relevel(model_inv_litter$invasiveness, ref = "Endotheliochorial")
+
+# Model 2: reference = Endotheliochorial
+invas_lit_long_pgls_endo <- pglsSEyPagel(
+  relative_litter_mass ~ invasiveness + longevity,
+  data = model_inv_litter,
+  tree = comp_phylo_lit$phy,
+  se = se_inv_litter,
+  method = "ML"
+)
+summary(invas_lit_long_pgls_endo)
+
+# Reset
+model_inv_litter$invasiveness <- factor(model_inv_litter$invasiveness, levels = c("Epitheliochorial", "Endotheliochorial", "Hemochorial"))
+
+
+
+```
+
+```{r relative_litter_mass ~ interdigitation}
+
+##LITTER MASS
+
+# Default factor with original reference
+model_inter_litter$interdigitation <- factor(model_inter_litter$interdigitation, levels = c("Villous", "Trabecular", "Labyrinthine"))
+
+# Log transform variables
+model_inter_litter$relative_litter_mass <- log(model_inter_litter$relative_litter_mass)
+model_inter_litter$longevity <- log(model_inter_litter$longevity)
+model_inter_litter$body_mass_g <- log(model_inter_litter$body_mass_g)
+
+### NO COVARIATES
+# Model 1: reference = Villous
+inter_lit_none_pgls_vil <- pglsSEyPagel(
+  relative_litter_mass ~ interdigitation,
+  data = model_inter_litter,
+  tree = comp_phylo_lit$phy,
+  se = se_inter_litter,
+  method = "ML"
+)
+summary(inter_lit_none_pgls_vil)
+
+model_inter_litter$interdigitation <- relevel(model_inter_litter$interdigitation, ref = "Trabecular")
+
+# Model 2: reference = Trabecular
+inter_lit_none_pgls_trab <- pglsSEyPagel(
+  relative_litter_mass ~ interdigitation,
+  data = model_inter_litter,
+  tree = comp_phylo_lit$phy,
+  se = se_inter_litter,
+  method = "ML"
+)
+summary(inter_lit_none_pgls_trab)
+
+# Reset
+model_inter_litter$interdigitation <- factor(model_inter_litter$interdigitation, levels = c("Villous", "Trabecular", "Labyrinthine"))
+
+### LONGEVITY ONLY
+# Model 1: reference = Villous
+inter_lit_long_pgls_vil <- pglsSEyPagel(
+  relative_litter_mass ~ interdigitation + longevity,
+  data = model_inter_litter,
+  tree = comp_phylo_lit$phy,
+  se = se_inter_litter,
+  method = "ML"
+)
+summary(inter_lit_long_pgls_vil)
+
+model_inter_litter$interdigitation <- relevel(model_inter_litter$interdigitation, ref = "Trabecular")
+
+# Model 2: reference = Trabecular
+inter_lit_long_pgls_trab <- pglsSEyPagel(
+  relative_litter_mass ~ interdigitation + longevity,
+  data = model_inter_litter,
+  tree = comp_phylo_lit$phy,
+  se = se_inter_litter,
+  method = "ML"
+)
+summary(inter_lit_long_pgls_trab)
+
+# Reset
+model_inter_litter$interdigitation <- factor(model_inter_litter$interdigitation, levels = c("Villous", "Trabecular", "Labyrinthine"))
+
+
+
+```
+
+```{r neonate_over_adult ~ invasiveness}
+
+##NEONATE BODY WEIGHT / ADULT BODY WEIGHT
+
+# Default factor with original reference
+model_inv_neo$invasiveness <- factor(model_inv_neo$invasiveness, levels = c("Epitheliochorial", "Endotheliochorial", "Hemochorial"))
+
+# Log transform variables
+model_inv_neo$neonate_over_adult <- log(model_inv_neo$neonate_over_adult)
+model_inv_neo$longevity <- log(model_inv_neo$longevity)
+model_inv_neo$body_mass_g <- log(model_inv_neo$body_mass_g)
+
+### NO COVARIATES
+# Model 1: reference = Epitheliochorial
+invas_neo_none_pgls_epi <- pglsSEyPagel(
+  neonate_over_adult ~ invasiveness,
+  data = model_inv_neo,
+  tree = comp_phylo_neo$phy,
+  se = se_inv_neo,
+  method = "ML"
+)
+summary(invas_neo_none_pgls_epi)
+
+model_inv_neo$invasiveness <- relevel(model_inv_neo$invasiveness, ref = "Endotheliochorial")
+
+# Model 2: reference = Endotheliochorial
+invas_neo_none_pgls_endo <- pglsSEyPagel(
+  neonate_over_adult ~ invasiveness,
+  data = model_inv_neo,
+  tree = comp_phylo_neo$phy,
+  se = se_inv_neo,
+  method = "ML"
+)
+summary(invas_neo_none_pgls_endo)
+
+# Reset
+model_inv_neo$invasiveness <- factor(model_inv_neo$invasiveness, levels = c("Epitheliochorial", "Endotheliochorial", "Hemochorial"))
+
+### LONGEVITY ONLY
+# Model 1: reference = Epitheliochorial
+invas_neo_long_pgls_epi <- pglsSEyPagel(
+  neonate_over_adult ~ invasiveness + longevity,
+  data = model_inv_neo,
+  tree = comp_phylo_neo$phy,
+  se = se_inv_neo,
+  method = "ML"
+)
+summary(invas_neo_long_pgls_epi)
+
+model_inv_neo$invasiveness <- relevel(model_inv_neo$invasiveness, ref = "Endotheliochorial")
+
+# Model 2: reference = Endotheliochorial
+invas_neo_long_pgls_endo <- pglsSEyPagel(
+  neonate_over_adult ~ invasiveness + longevity,
+  data = model_inv_neo,
+  tree = comp_phylo_neo$phy,
+  se = se_inv_neo,
+  method = "ML"
+)
+summary(invas_neo_long_pgls_endo)
+
+# Reset
+model_inv_neo$invasiveness <- factor(model_inv_neo$invasiveness, levels = c("Epitheliochorial", "Endotheliochorial", "Hemochorial"))
+
+
+
+```
+
+```{r neonate_over_adult ~ interdigitation}
+
+##NEONATE BODY WEIGHT / ADULT BODY WEIGHT
+
+# Default factor with original reference
+model_inter_neo$interdigitation <- factor(model_inter_neo$interdigitation, levels = c("Villous", "Trabecular", "Labyrinthine"))
+
+# Log transform variables
+model_inter_neo$neonate_over_adult <- log(model_inter_neo$neonate_over_adult)
+model_inter_neo$longevity <- log(model_inter_neo$longevity)
+model_inter_neo$body_mass_g <- log(model_inter_neo$body_mass_g)
+
+### NO COVARIATES
+# Model 1: reference = Villous
+inter_neo_none_pgls_vil <- pglsSEyPagel(
+  neonate_over_adult ~ interdigitation,
+  data = model_inter_neo,
+  tree = comp_phylo_neo$phy,
+  se = se_inter_neo,
+  method = "ML"
+)
+summary(inter_neo_none_pgls_vil)
+
+model_inter_neo$interdigitation <- relevel(model_inter_neo$interdigitation, ref = "Trabecular")
+
+# Model 2: reference = Trabecular
+inter_neo_none_pgls_trab <- pglsSEyPagel(
+  neonate_over_adult ~ interdigitation,
+  data = model_inter_neo,
+  tree = comp_phylo_neo$phy,
+  se = se_inter_neo,
+  method = "ML"
+)
+summary(inter_neo_none_pgls_trab)
+
+# Reset
+model_inter_neo$interdigitation <- factor(model_inter_neo$interdigitation, levels = c("Villous", "Trabecular", "Labyrinthine"))
+
+### LONGEVITY ONLY
+# Model 1: reference = Villous
+inter_neo_long_pgls_vil <- pglsSEyPagel(
+  neonate_over_adult ~ interdigitation + longevity,
+  data = model_inter_neo,
+  tree = comp_phylo_neo$phy,
+  se = se_inter_neo,
+  method = "ML"
+)
+summary(inter_neo_long_pgls_vil)
+
+model_inter_neo$interdigitation <- relevel(model_inter_neo$interdigitation, ref = "Trabecular")
+
+# Model 2: reference = Trabecular
+inter_neo_long_pgls_trab <- pglsSEyPagel(
+  neonate_over_adult ~ interdigitation + longevity,
+  data = model_inter_neo,
+  tree = comp_phylo_neo$phy,
+  se = se_inter_neo,
+  method = "ML"
+)
+summary(inter_neo_long_pgls_trab)
+
+# Reset
+model_inter_neo$interdigitation <- factor(model_inter_neo$interdigitation, levels = c("Villous", "Trabecular", "Labyrinthine"))
+
+
+
+```
+
+```{r interbirth_interval ~ invasiveness}
+
+##INTERBIRTH INTERVAL
+
+# Default factor with original reference
+model_inv_interval$invasiveness <- factor(model_inv_interval$invasiveness, levels = c("Epitheliochorial", "Endotheliochorial", "Hemochorial"))
+
+# Log transform variables
+model_inv_interval$interbirth_interval <- log(model_inv_interval$interbirth_interval)
+model_inv_interval$longevity <- log(model_inv_interval$longevity)
+model_inv_interval$body_mass_g <- log(model_inv_interval$body_mass_g)
+
+### NO COVARIATES
+# Model 1: reference = Epitheliochorial
+invas_interval_none_pgls_epi <- pglsSEyPagel(
+  interbirth_interval ~ invasiveness,
+  data = model_inv_interval,
+  tree = comp_phylo_interval$phy,
+  se = se_inv_interval,
+  method = "ML"
+)
+summary(invas_interval_none_pgls_epi)
+
+model_inv_interval$invasiveness <- relevel(model_inv_interval$invasiveness, ref = "Endotheliochorial")
+
+# Model 2: reference = Endotheliochorial
+invas_interval_none_pgls_endo <- pglsSEyPagel(
+  interbirth_interval ~ invasiveness,
+  data = model_inv_interval,
+  tree = comp_phylo_interval$phy,
+  se = se_inv_interval,
+  method = "ML"
+)
+summary(invas_interval_none_pgls_endo)
+
+# Reset
+model_inv_interval$invasiveness <- factor(model_inv_interval$invasiveness, levels = c("Epitheliochorial", "Endotheliochorial", "Hemochorial"))
+
+### LONGEVITY ONLY
+# Model 1: reference = Epitheliochorial
+invas_interval_long_pgls_epi <- pglsSEyPagel(
+  interbirth_interval ~ invasiveness + longevity,
+  data = model_inv_interval,
+  tree = comp_phylo_interval$phy,
+  se = se_inv_interval,
+  method = "ML"
+)
+summary(invas_interval_long_pgls_epi)
+
+model_inv_interval$invasiveness <- relevel(model_inv_interval$invasiveness, ref = "Endotheliochorial")
+
+# Model 2: reference = Endotheliochorial
+invas_interval_long_pgls_endo <- pglsSEyPagel(
+  interbirth_interval ~ invasiveness + longevity,
+  data = model_inv_interval,
+  tree = comp_phylo_interval$phy,
+  se = se_inv_interval,
+  method = "ML"
+)
+summary(invas_interval_long_pgls_endo)
+
+# Reset
+model_inv_interval$invasiveness <- factor(model_inv_interval$invasiveness, levels = c("Epitheliochorial", "Endotheliochorial", "Hemochorial"))
+
+### BODY MASS ONLY
+# Model 1: reference = Epitheliochorial
+invas_interval_adult_pgls_epi <- pglsSEyPagel(
+  interbirth_interval ~ invasiveness + body_mass_g,
+  data = model_inv_interval,
+  tree = comp_phylo_interval$phy,
+  se = se_inv_interval,
+  method = "ML"
+)
+summary(invas_interval_adult_pgls_epi)
+
+model_inv_interval$invasiveness <- relevel(model_inv_interval$invasiveness, ref = "Endotheliochorial")
+
+# Model 2: reference = Endotheliochorial
+invas_interval_adult_pgls_endo <- pglsSEyPagel(
+  interbirth_interval ~ invasiveness + body_mass_g,
+  data = model_inv_interval,
+  tree = comp_phylo_interval$phy,
+  se = se_inv_interval,
+  method = "ML"
+)
+summary(invas_interval_adult_pgls_endo)
+
+# Reset
+model_inv_interval$invasiveness <- factor(model_inv_interval$invasiveness, levels = c("Epitheliochorial", "Endotheliochorial", "Hemochorial"))
+
+### BOTH COVARIATES
+# Model 1: reference = Epitheliochorial
+invas_interval_both_pgls_epi <- pglsSEyPagel(
+  interbirth_interval ~ invasiveness + longevity + body_mass_g,
+  data = model_inv_interval,
+  tree = comp_phylo_interval$phy,
+  se = se_inv_interval,
+  method = "ML"
+)
+summary(invas_interval_both_pgls_epi)
+
+model_inv_interval$invasiveness <- relevel(model_inv_interval$invasiveness, ref = "Endotheliochorial")
+
+# Model 2: reference = Endotheliochorial
+invas_interval_both_pgls_endo <- pglsSEyPagel(
+  interbirth_interval ~ invasiveness + longevity + body_mass_g,
+  data = model_inv_interval,
+  tree = comp_phylo_interval$phy,
+  se = se_inv_interval,
+  method = "ML"
+)
+summary(invas_interval_both_pgls_endo)
+
+# Reset
+model_inv_interval$invasiveness <- factor(model_inv_interval$invasiveness, levels = c("Epitheliochorial", "Endotheliochorial", "Hemochorial"))
+
+```
+
+```{r interbirth_interval ~ interdigitation}
+
+##INTERBIRTH INTERVAL
+
+# Default factor with original reference
+model_inter_interval$interdigitation <- factor(model_inter_interval$interdigitation, levels = c("Villous", "Trabecular", "Labyrinthine"))
+
+# Log transform variables
+model_inter_interval$interbirth_interval <- log(model_inter_interval$interbirth_interval)
+model_inter_interval$longevity <- log(model_inter_interval$longevity)
+model_inter_interval$body_mass_g <- log(model_inter_interval$body_mass_g)
+
+### NO COVARIATES
+# Model 1: reference = Villous
+inter_interval_none_pgls_vil <- pglsSEyPagel(
+  interbirth_interval ~ interdigitation,
+  data = model_inter_interval,
+  tree = comp_phylo_interval$phy,
+  se = se_inter_interval,
+  method = "ML"
+)
+summary(inter_interval_none_pgls_vil)
+
+model_inter_interval$interdigitation <- relevel(model_inter_interval$interdigitation, ref = "Trabecular")
+
+# Model 2: reference = Trabecular
+inter_interval_none_pgls_trab <- pglsSEyPagel(
+  interbirth_interval ~ interdigitation,
+  data = model_inter_interval,
+  tree = comp_phylo_interval$phy,
+  se = se_inter_interval,
+  method = "ML"
+)
+summary(inter_interval_none_pgls_trab)
+
+# Reset
+model_inter_interval$interdigitation <- factor(model_inter_interval$interdigitation, levels = c("Villous", "Trabecular", "Labyrinthine"))
+
+### LONGEVITY ONLY
+# Model 1: reference = Villous
+inter_interval_long_pgls_vil <- pglsSEyPagel(
+  interbirth_interval ~ interdigitation + longevity,
+  data = model_inter_interval,
+  tree = comp_phylo_interval$phy,
+  se = se_inter_interval,
+  method = "ML"
+)
+summary(inter_interval_long_pgls_vil)
+
+model_inter_interval$interdigitation <- relevel(model_inter_interval$interdigitation, ref = "Trabecular")
+
+# Model 2: reference = Trabecular
+inter_interval_long_pgls_trab <- pglsSEyPagel(
+  interbirth_interval ~ interdigitation + longevity,
+  data = model_inter_interval,
+  tree = comp_phylo_interval$phy,
+  se = se_inter_interval,
+  method = "ML"
+)
+summary(inter_interval_long_pgls_trab)
+
+# Reset
+model_inter_interval$interdigitation <- factor(model_inter_interval$interdigitation, levels = c("Villous", "Trabecular", "Labyrinthine"))
+
+### BODY MASS ONLY
+# Model 1: reference = Villous
+inter_interval_adult_pgls_vil <- pglsSEyPagel(
+  interbirth_interval ~ interdigitation + body_mass_g,
+  data = model_inter_interval,
+  tree = comp_phylo_interval$phy,
+  se = se_inter_interval,
+  method = "ML"
+)
+summary(inter_interval_adult_pgls_vil)
+
+model_inter_interval$interdigitation <- relevel(model_inter_interval$interdigitation, ref = "Trabecular")
+
+# Model 2: reference = Trabecular
+inter_interval_adult_pgls_trab <- pglsSEyPagel(
+  interbirth_interval ~ interdigitation + body_mass_g,
+  data = model_inter_interval,
+  tree = comp_phylo_interval$phy,
+  se = se_inter_interval,
+  method = "ML"
+)
+summary(inter_interval_adult_pgls_trab)
+
+# Reset
+model_inter_interval$interdigitation <- factor(model_inter_interval$interdigitation, levels = c("Villous", "Trabecular", "Labyrinthine"))
+
+### BOTH COVARIATES
+# Model 1: reference = Villous
+inter_interval_both_pgls_vil <- pglsSEyPagel(
+  interbirth_interval ~ interdigitation + longevity + body_mass_g,
+  data = model_inter_interval,
+  tree = comp_phylo_interval$phy,
+  se = se_inter_interval,
+  method = "ML"
+)
+summary(inter_interval_both_pgls_vil)
+
+model_inter_interval$interdigitation <- relevel(model_inter_interval$interdigitation, ref = "Trabecular")
+
+# Model 2: reference = Trabecular
+inter_interval_both_pgls_trab <- pglsSEyPagel(
+  interbirth_interval ~ interdigitation + longevity + body_mass_g,
+  data = model_inter_interval,
+  tree = comp_phylo_interval$phy,
+  se = se_inter_interval,
+  method = "ML"
+)
+summary(inter_interval_both_pgls_trab)
+
+# Reset
+model_inter_interval$interdigitation <- factor(model_inter_interval$interdigitation, levels = c("Villous", "Trabecular", "Labyrinthine"))
+
+```
+
+```{r female gestation_length ~ invasiveness}
+
+##FEMALE SUBSET — GESTATION LENGTH
+
+
+
+model_inv_ges_female$invasiveness <- factor(model_inv_ges_female$invasiveness, levels = c("Epitheliochorial", "Endotheliochorial", "Hemochorial"))
+
+model_inv_ges_female$gestation_length <- log(model_inv_ges_female$gestation_length)
+model_inv_ges_female$longevity <- log(model_inv_ges_female$longevity)
+model_inv_ges_female$female_body_mass_g <- log(model_inv_ges_female$female_body_mass_g)
+
+### FEMALE BODY MASS ONLY
+# Model 1: reference = Epitheliochorial
+invas_ges_female_pgls_epi <- pglsSEyPagel(
+  gestation_length ~ invasiveness + female_body_mass_g,
+  data = model_inv_ges_female,
+  tree = comp_phylo_ges_female$phy,
+  se = se_inv_ges_female,
+  method = "ML"
+)
+summary(invas_ges_female_pgls_epi)
+
+model_inv_ges_female$invasiveness <- relevel(model_inv_ges_female$invasiveness, ref = "Endotheliochorial")
+
+# Model 2: reference = Endotheliochorial
+invas_ges_female_pgls_endo <- pglsSEyPagel(
+  gestation_length ~ invasiveness + female_body_mass_g,
+  data = model_inv_ges_female,
+  tree = comp_phylo_ges_female$phy,
+  se = se_inv_ges_female,
+  method = "ML"
+)
+summary(invas_ges_female_pgls_endo)
+
+# Reset
+model_inv_ges_female$invasiveness <- factor(model_inv_ges_female$invasiveness, levels = c("Epitheliochorial", "Endotheliochorial", "Hemochorial"))
+
+### LONGEVITY + FEMALE BODY MASS
+# Model 1: reference = Epitheliochorial
+invas_ges_longfemale_pgls_epi <- pglsSEyPagel(
+  gestation_length ~ invasiveness + longevity + female_body_mass_g,
+  data = model_inv_ges_female,
+  tree = comp_phylo_ges_female$phy,
+  se = se_inv_ges_female,
+  method = "ML"
+)
+summary(invas_ges_longfemale_pgls_epi)
+
+model_inv_ges_female$invasiveness <- relevel(model_inv_ges_female$invasiveness, ref = "Endotheliochorial")
+
+# Model 2: reference = Endotheliochorial
+invas_ges_longfemale_pgls_endo <- pglsSEyPagel(
+  gestation_length ~ invasiveness + longevity + female_body_mass_g,
+  data = model_inv_ges_female,
+  tree = comp_phylo_ges_female$phy,
+  se = se_inv_ges_female,
+  method = "ML"
+)
+summary(invas_ges_longfemale_pgls_endo)
+
+# Reset
+model_inv_ges_female$invasiveness <- factor(model_inv_ges_female$invasiveness, levels = c("Epitheliochorial", "Endotheliochorial", "Hemochorial"))
+
+```
+
+```{r female gestation_length ~ interdigitation}
+
+##FEMALE SUBSET — GESTATION LENGTH
+
+
+model_inter_ges_female$interdigitation <- factor(model_inter_ges_female$interdigitation, levels = c("Villous", "Trabecular", "Labyrinthine"))
+
+model_inter_ges_female$gestation_length <- log(model_inter_ges_female$gestation_length)
+model_inter_ges_female$longevity <- log(model_inter_ges_female$longevity)
+model_inter_ges_female$female_body_mass_g <- log(model_inter_ges_female$female_body_mass_g)
+
+### FEMALE BODY MASS ONLY
+# Model 1: reference = Villous
+inter_ges_female_pgls_vil <- pglsSEyPagel(
+  gestation_length ~ interdigitation + female_body_mass_g,
+  data = model_inter_ges_female,
+  tree = comp_phylo_ges_female$phy,
+  se = se_inter_ges_female,
+  method = "ML"
+)
+summary(inter_ges_female_pgls_vil)
+
+model_inter_ges_female$interdigitation <- relevel(model_inter_ges_female$interdigitation, ref = "Trabecular")
+
+# Model 2: reference = Trabecular
+inter_ges_female_pgls_trab <- pglsSEyPagel(
+  gestation_length ~ interdigitation + female_body_mass_g,
+  data = model_inter_ges_female,
+  tree = comp_phylo_ges_female$phy,
+  se = se_inter_ges_female,
+  method = "ML"
+)
+summary(inter_ges_female_pgls_trab)
+
+# Reset
+model_inter_ges_female$interdigitation <- factor(model_inter_ges_female$interdigitation, levels = c("Villous", "Trabecular", "Labyrinthine"))
+
+### LONGEVITY + FEMALE BODY MASS
+# Model 1: reference = Villous
+inter_ges_longfemale_pgls_vil <- pglsSEyPagel(
+  gestation_length ~ interdigitation + longevity + female_body_mass_g,
+  data = model_inter_ges_female,
+  tree = comp_phylo_ges_female$phy,
+  se = se_inter_ges_female,
+  method = "ML"
+)
+summary(inter_ges_longfemale_pgls_vil)
+
+model_inter_ges_female$interdigitation <- relevel(model_inter_ges_female$interdigitation, ref = "Trabecular")
+
+# Model 2: reference = Trabecular
+inter_ges_longfemale_pgls_trab <- pglsSEyPagel(
+  gestation_length ~ interdigitation + longevity + female_body_mass_g,
+  data = model_inter_ges_female,
+  tree = comp_phylo_ges_female$phy,
+  se = se_inter_ges_female,
+  method = "ML"
+)
+summary(inter_ges_longfemale_pgls_trab)
+
+# Reset
+model_inter_ges_female$interdigitation <- factor(model_inter_ges_female$interdigitation, levels = c("Villous", "Trabecular", "Labyrinthine"))
+
+```
+
+```{r female litter_size ~ invasiveness}
+
+##FEMALE SUBSET — LITTER SIZE
+
+
+model_inv_litsize_female$invasiveness <- factor(model_inv_litsize_female$invasiveness, levels = c("Epitheliochorial", "Endotheliochorial", "Hemochorial"))
+
+model_inv_litsize_female$litter_size <- log(model_inv_litsize_female$litter_size)
+model_inv_litsize_female$longevity <- log(model_inv_litsize_female$longevity)
+model_inv_litsize_female$female_body_mass_g <- log(model_inv_litsize_female$female_body_mass_g)
+
+### FEMALE BODY MASS ONLY
+# Model 1: reference = Epitheliochorial
+invas_litsize_female_pgls_epi <- pglsSEyPagel(
+  litter_size ~ invasiveness + female_body_mass_g,
+  data = model_inv_litsize_female,
+  tree = comp_phylo_litsize_female$phy,
+  se = se_inv_litsize_female,
+  method = "ML"
+)
+summary(invas_litsize_female_pgls_epi)
+
+model_inv_litsize_female$invasiveness <- relevel(model_inv_litsize_female$invasiveness, ref = "Endotheliochorial")
+
+# Model 2: reference = Endotheliochorial
+invas_litsize_female_pgls_endo <- pglsSEyPagel(
+  litter_size ~ invasiveness + female_body_mass_g,
+  data = model_inv_litsize_female,
+  tree = comp_phylo_litsize_female$phy,
+  se = se_inv_litsize_female,
+  method = "ML"
+)
+summary(invas_litsize_female_pgls_endo)
+
+# Reset
+model_inv_litsize_female$invasiveness <- factor(model_inv_litsize_female$invasiveness, levels = c("Epitheliochorial", "Endotheliochorial", "Hemochorial"))
+
+### LONGEVITY + FEMALE BODY MASS
+# Model 1: reference = Epitheliochorial
+invas_litsize_longfemale_pgls_epi <- pglsSEyPagel(
+  litter_size ~ invasiveness + longevity + female_body_mass_g,
+  data = model_inv_litsize_female,
+  tree = comp_phylo_litsize_female$phy,
+  se = se_inv_litsize_female,
+  method = "ML"
+)
+summary(invas_litsize_longfemale_pgls_epi)
+
+model_inv_litsize_female$invasiveness <- relevel(model_inv_litsize_female$invasiveness, ref = "Endotheliochorial")
+
+# Model 2: reference = Endotheliochorial
+invas_litsize_longfemale_pgls_endo <- pglsSEyPagel(
+  litter_size ~ invasiveness + longevity + female_body_mass_g,
+  data = model_inv_litsize_female,
+  tree = comp_phylo_litsize_female$phy,
+  se = se_inv_litsize_female,
+  method = "ML"
+)
+summary(invas_litsize_longfemale_pgls_endo)
+
+# Reset
+model_inv_litsize_female$invasiveness <- factor(model_inv_litsize_female$invasiveness, levels = c("Epitheliochorial", "Endotheliochorial", "Hemochorial"))
+
+```
+
+```{r female litter_size ~ interdigitation}
+
+##FEMALE SUBSET — LITTER SIZE
+
+
+model_inter_litsize_female$interdigitation <- factor(model_inter_litsize_female$interdigitation, levels = c("Villous", "Trabecular", "Labyrinthine"))
+
+model_inter_litsize_female$litter_size <- log(model_inter_litsize_female$litter_size)
+model_inter_litsize_female$longevity <- log(model_inter_litsize_female$longevity)
+model_inter_litsize_female$female_body_mass_g <- log(model_inter_litsize_female$female_body_mass_g)
+
+### FEMALE BODY MASS ONLY
+# Model 1: reference = Villous
+inter_litsize_female_pgls_vil <- pglsSEyPagel(
+  litter_size ~ interdigitation + female_body_mass_g,
+  data = model_inter_litsize_female,
+  tree = comp_phylo_litsize_female$phy,
+  se = se_inter_litsize_female,
+  method = "ML"
+)
+summary(inter_litsize_female_pgls_vil)
+
+model_inter_litsize_female$interdigitation <- relevel(model_inter_litsize_female$interdigitation, ref = "Trabecular")
+
+# Model 2: reference = Trabecular
+inter_litsize_female_pgls_trab <- pglsSEyPagel(
+  litter_size ~ interdigitation + female_body_mass_g,
+  data = model_inter_litsize_female,
+  tree = comp_phylo_litsize_female$phy,
+  se = se_inter_litsize_female,
+  method = "ML"
+)
+summary(inter_litsize_female_pgls_trab)
+
+# Reset
+model_inter_litsize_female$interdigitation <- factor(model_inter_litsize_female$interdigitation, levels = c("Villous", "Trabecular", "Labyrinthine"))
+
+### LONGEVITY + FEMALE BODY MASS
+# Model 1: reference = Villous
+inter_litsize_longfemale_pgls_vil <- pglsSEyPagel(
+  litter_size ~ interdigitation + longevity + female_body_mass_g,
+  data = model_inter_litsize_female,
+  tree = comp_phylo_litsize_female$phy,
+  se = se_inter_litsize_female,
+  method = "ML"
+)
+summary(inter_litsize_longfemale_pgls_vil)
+
+model_inter_litsize_female$interdigitation <- relevel(model_inter_litsize_female$interdigitation, ref = "Trabecular")
+
+# Model 2: reference = Trabecular
+inter_litsize_longfemale_pgls_trab <- pglsSEyPagel(
+  litter_size ~ interdigitation + longevity + female_body_mass_g,
+  data = model_inter_litsize_female,
+  tree = comp_phylo_litsize_female$phy,
+  se = se_inter_litsize_female,
+  method = "ML"
+)
+summary(inter_litsize_longfemale_pgls_trab)
+
+# Reset
+model_inter_litsize_female$interdigitation <- factor(model_inter_litsize_female$interdigitation, levels = c("Villous", "Trabecular", "Labyrinthine"))
+
+```
+
+```{r female relative_litter_mass ~ invasiveness}
+
+##FEMALE SUBSET — LITTER MASS
+
+model_inv_litter_female$invasiveness <- factor(model_inv_litter_female$invasiveness, levels = c("Epitheliochorial", "Endotheliochorial", "Hemochorial"))
+
+model_inv_litter_female$relative_litter_mass_female <- log(model_inv_litter_female$relative_litter_mass_female)
+model_inv_litter_female$longevity <- log(model_inv_litter_female$longevity)
+model_inv_litter_female$female_body_mass_g <- log(model_inv_litter_female$female_body_mass_g)
+
+### FEMALE BODY MASS ONLY
+# Model 1: reference = Epitheliochorial
+invas_lit_female_pgls_epi <- pglsSEyPagel(
+  relative_litter_mass_female ~ invasiveness,
+  data = model_inv_litter_female,
+  tree = comp_phylo_lit_female$phy,
+  se = se_inv_litter_female,
+  method = "ML"
+)
+summary(invas_lit_female_pgls_epi)
+
+model_inv_litter_female$invasiveness <- relevel(model_inv_litter_female$invasiveness, ref = "Endotheliochorial")
+
+# Model 2: reference = Endotheliochorial
+invas_lit_female_pgls_endo <- pglsSEyPagel(
+  relative_litter_mass_female ~ invasiveness,
+  data = model_inv_litter_female,
+  tree = comp_phylo_lit_female$phy,
+  se = se_inv_litter_female,
+  method = "ML"
+)
+summary(invas_lit_female_pgls_endo)
+
+# Reset
+model_inv_litter_female$invasiveness <- factor(model_inv_litter_female$invasiveness, levels = c("Epitheliochorial", "Endotheliochorial", "Hemochorial"))
+
+### LONGEVITY
+# Model 1: reference = Epitheliochorial
+invas_lit_longfemale_pgls_epi <- pglsSEyPagel(
+  relative_litter_mass_female ~ invasiveness + longevity,
+  data = model_inv_litter_female,
+  tree = comp_phylo_lit_female$phy,
+  se = se_inv_litter_female,
+  method = "ML"
+)
+summary(invas_lit_longfemale_pgls_epi)
+
+model_inv_litter_female$invasiveness <- relevel(model_inv_litter_female$invasiveness, ref = "Endotheliochorial")
+
+# Model 2: reference = Endotheliochorial
+invas_lit_longfemale_pgls_endo <- pglsSEyPagel(
+  relative_litter_mass_female ~ invasiveness + longevity,
+  data = model_inv_litter_female,
+  tree = comp_phylo_lit_female$phy,
+  se = se_inv_litter_female,
+  method = "ML"
+)
+summary(invas_lit_longfemale_pgls_endo)
+
+# Reset
+model_inv_litter_female$invasiveness <- factor(model_inv_litter_female$invasiveness, levels = c("Epitheliochorial", "Endotheliochorial", "Hemochorial"))
+
+```
+
+```{r female relative_litter_mass ~ interdigitation}
+
+##FEMALE SUBSET — LITTER MASS
+
+model_inter_litter_female$interdigitation <- factor(model_inter_litter_female$interdigitation, levels = c("Villous", "Trabecular", "Labyrinthine"))
+
+model_inter_litter_female$relative_litter_mass_female <- log(model_inter_litter_female$relative_litter_mass_female)
+model_inter_litter_female$longevity <- log(model_inter_litter_female$longevity)
+model_inter_litter_female$female_body_mass_g <- log(model_inter_litter_female$female_body_mass_g)
+
+### FEMALE BODY MASS ONLY
+# Model 1: reference = Villous
+inter_lit_female_pgls_vil <- pglsSEyPagel(
+  relative_litter_mass_female ~ interdigitation,
+  data = model_inter_litter_female,
+  tree = comp_phylo_lit_female$phy,
+  se = se_inter_litter_female,
+  method = "ML"
+)
+summary(inter_lit_female_pgls_vil)
+
+model_inter_litter_female$interdigitation <- relevel(model_inter_litter_female$interdigitation, ref = "Trabecular")
+
+# Model 2: reference = Trabecular
+inter_lit_female_pgls_trab <- pglsSEyPagel(
+  relative_litter_mass_female ~ interdigitation,
+  data = model_inter_litter_female,
+  tree = comp_phylo_lit_female$phy,
+  se = se_inter_litter_female,
+  method = "ML"
+)
+summary(inter_lit_female_pgls_trab)
+
+# Reset
+model_inter_litter_female$interdigitation <- factor(model_inter_litter_female$interdigitation, levels = c("Villous", "Trabecular", "Labyrinthine"))
+
+### LONGEVITY 
+# Model 1: reference = Villous
+inter_lit_longfemale_pgls_vil <- pglsSEyPagel(
+  relative_litter_mass_female ~ interdigitation + longevity,
+  data = model_inter_litter_female,
+  tree = comp_phylo_lit_female$phy,
+  se = se_inter_litter_female,
+  method = "ML"
+)
+summary(inter_lit_longfemale_pgls_vil)
+
+model_inter_litter_female$interdigitation <- relevel(model_inter_litter_female$interdigitation, ref = "Trabecular")
+
+# Model 2: reference = Trabecular
+inter_lit_longfemale_pgls_trab <- pglsSEyPagel(
+  relative_litter_mass_female ~ interdigitation + longevity,
+  data = model_inter_litter_female,
+  tree = comp_phylo_lit_female$phy,
+  se = se_inter_litter_female,
+  method = "ML"
+)
+summary(inter_lit_longfemale_pgls_trab)
+
+# Reset
+model_inter_litter_female$interdigitation <- factor(model_inter_litter_female$interdigitation, levels = c("Villous", "Trabecular", "Labyrinthine"))
+
+```
+
+```{r female neonate_over_adult ~ invasiveness}
+
+##FEMALE SUBSET — NEONATE BODY WEIGHT / FEMALE BODY WEIGHT
+
+model_inv_neo_female$invasiveness <- factor(model_inv_neo_female$invasiveness, levels = c("Epitheliochorial", "Endotheliochorial", "Hemochorial"))
+
+model_inv_neo_female$neonate_over_adult <- log(model_inv_neo_female$neonate_over_adult)
+model_inv_neo_female$longevity <- log(model_inv_neo_female$longevity)
+model_inv_neo_female$female_body_mass_g <- log(model_inv_neo_female$female_body_mass_g)
+
+### FEMALE BODY MASS ONLY
+# Model 1: reference = Epitheliochorial
+invas_neo_female_pgls_epi <- pglsSEyPagel(
+  neonate_over_adult ~ invasiveness,
+  data = model_inv_neo_female,
+  tree = comp_phylo_neo_female$phy,
+  se = se_inv_neo_female,
+  method = "ML"
+)
+summary(invas_neo_female_pgls_epi)
+
+model_inv_neo_female$invasiveness <- relevel(model_inv_neo_female$invasiveness, ref = "Endotheliochorial")
+
+# Model 2: reference = Endotheliochorial
+invas_neo_female_pgls_endo <- pglsSEyPagel(
+  neonate_over_adult ~ invasiveness,
+  data = model_inv_neo_female,
+  tree = comp_phylo_neo_female$phy,
+  se = se_inv_neo_female,
+  method = "ML"
+)
+summary(invas_neo_female_pgls_endo)
+
+# Reset
+model_inv_neo_female$invasiveness <- factor(model_inv_neo_female$invasiveness, levels = c("Epitheliochorial", "Endotheliochorial", "Hemochorial"))
+
+### LONGEVITY + FEMALE BODY MASS
+# Model 1: reference = Epitheliochorial
+invas_neo_longfemale_pgls_epi <- pglsSEyPagel(
+  neonate_over_adult ~ invasiveness + longevity,
+  data = model_inv_neo_female,
+  tree = comp_phylo_neo_female$phy,
+  se = se_inv_neo_female,
+  method = "ML"
+)
+summary(invas_neo_longfemale_pgls_epi)
+
+model_inv_neo_female$invasiveness <- relevel(model_inv_neo_female$invasiveness, ref = "Endotheliochorial")
+
+# Model 2: reference = Endotheliochorial
+invas_neo_longfemale_pgls_endo <- pglsSEyPagel(
+  neonate_over_adult ~ invasiveness + longevity,
+  data = model_inv_neo_female,
+  tree = comp_phylo_neo_female$phy,
+  se = se_inv_neo_female,
+  method = "ML"
+)
+summary(invas_neo_longfemale_pgls_endo)
+
+# Reset
+model_inv_neo_female$invasiveness <- factor(model_inv_neo_female$invasiveness, levels = c("Epitheliochorial", "Endotheliochorial", "Hemochorial"))
+
+```
+
+```{r female neonate_over_adult ~ interdigitation}
+
+##FEMALE SUBSET — NEONATE BODY WEIGHT / FEMALE BODY WEIGHT
+
+model_inter_neo_female$interdigitation <- factor(model_inter_neo_female$interdigitation, levels = c("Villous", "Trabecular", "Labyrinthine"))
+
+model_inter_neo_female$neonate_over_adult <- log(model_inter_neo_female$neonate_over_adult)
+model_inter_neo_female$longevity <- log(model_inter_neo_female$longevity)
+model_inter_neo_female$female_body_mass_g <- log(model_inter_neo_female$female_body_mass_g)
+
+### FEMALE BODY MASS ONLY
+# Model 1: reference = Villous
+inter_neo_female_pgls_vil <- pglsSEyPagel(
+  neonate_over_adult ~ interdigitation,
+  data = model_inter_neo_female,
+  tree = comp_phylo_neo_female$phy,
+  se = se_inter_neo_female,
+  method = "ML"
+)
+summary(inter_neo_female_pgls_vil)
+
+model_inter_neo_female$interdigitation <- relevel(model_inter_neo_female$interdigitation, ref = "Trabecular")
+
+# Model 2: reference = Trabecular
+inter_neo_female_pgls_trab <- pglsSEyPagel(
+  neonate_over_adult ~ interdigitation,
+  data = model_inter_neo_female,
+  tree = comp_phylo_neo_female$phy,
+  se = se_inter_neo_female,
+  method = "ML"
+)
+summary(inter_neo_female_pgls_trab)
+
+# Reset
+model_inter_neo_female$interdigitation <- factor(model_inter_neo_female$interdigitation, levels = c("Villous", "Trabecular", "Labyrinthine"))
+
+### LONGEVITY + FEMALE BODY MASS
+# Model 1: reference = Villous
+inter_neo_longfemale_pgls_vil <- pglsSEyPagel(
+  neonate_over_adult ~ interdigitation + longevity,
+  data = model_inter_neo_female,
+  tree = comp_phylo_neo_female$phy,
+  se = se_inter_neo_female,
+  method = "ML"
+)
+summary(inter_neo_longfemale_pgls_vil)
+
+model_inter_neo_female$interdigitation <- relevel(model_inter_neo_female$interdigitation, ref = "Trabecular")
+
+# Model 2: reference = Trabecular
+inter_neo_longfemale_pgls_trab <- pglsSEyPagel(
+  neonate_over_adult ~ interdigitation + longevity,
+  data = model_inter_neo_female,
+  tree = comp_phylo_neo_female$phy,
+  se = se_inter_neo_female,
+  method = "ML"
+)
+summary(inter_neo_longfemale_pgls_trab)
+
+# Reset
+model_inter_neo_female$interdigitation <- factor(model_inter_neo_female$interdigitation, levels = c("Villous", "Trabecular", "Labyrinthine"))
+
+```
+
+```{r female interbirth_interval ~ invasiveness}
+
+##FEMALE SUBSET — INTERBIRTH INTERVAL
+
+model_inv_interval_female$invasiveness <- factor(model_inv_interval_female$invasiveness, levels = c("Epitheliochorial", "Endotheliochorial", "Hemochorial"))
+
+model_inv_interval_female$interbirth_interval <- log(model_inv_interval_female$interbirth_interval)
+model_inv_interval_female$longevity <- log(model_inv_interval_female$longevity)
+model_inv_interval_female$female_body_mass_g <- log(model_inv_interval_female$female_body_mass_g)
+
+### FEMALE BODY MASS ONLY
+# Model 1: reference = Epitheliochorial
+invas_interval_female_pgls_epi <- pglsSEyPagel(
+  interbirth_interval ~ invasiveness + female_body_mass_g,
+  data = model_inv_interval_female,
+  tree = comp_phylo_interval_female$phy,
+  se = se_inv_interval_female,
+  method = "ML"
+)
+summary(invas_interval_female_pgls_epi)
+
+model_inv_interval_female$invasiveness <- relevel(model_inv_interval_female$invasiveness, ref = "Endotheliochorial")
+
+# Model 2: reference = Endotheliochorial
+invas_interval_female_pgls_endo <- pglsSEyPagel(
+  interbirth_interval ~ invasiveness + female_body_mass_g,
+  data = model_inv_interval_female,
+  tree = comp_phylo_interval_female$phy,
+  se = se_inv_interval_female,
+  method = "ML"
+)
+summary(invas_interval_female_pgls_endo)
+
+# Reset
+model_inv_interval_female$invasiveness <- factor(model_inv_interval_female$invasiveness, levels = c("Epitheliochorial", "Endotheliochorial", "Hemochorial"))
+
+### LONGEVITY + FEMALE BODY MASS
+# Model 1: reference = Epitheliochorial
+invas_interval_longfemale_pgls_epi <- pglsSEyPagel(
+  interbirth_interval ~ invasiveness + longevity + female_body_mass_g,
+  data = model_inv_interval_female,
+  tree = comp_phylo_interval_female$phy,
+  se = se_inv_interval_female,
+  method = "ML"
+)
+summary(invas_interval_longfemale_pgls_epi)
+
+model_inv_interval_female$invasiveness <- relevel(model_inv_interval_female$invasiveness, ref = "Endotheliochorial")
+
+# Model 2: reference = Endotheliochorial
+invas_interval_longfemale_pgls_endo <- pglsSEyPagel(
+  interbirth_interval ~ invasiveness + longevity + female_body_mass_g,
+  data = model_inv_interval_female,
+  tree = comp_phylo_interval_female$phy,
+  se = se_inv_interval_female,
+  method = "ML"
+)
+summary(invas_interval_longfemale_pgls_endo)
+
+# Reset
+model_inv_interval_female$invasiveness <- factor(model_inv_interval_female$invasiveness, levels = c("Epitheliochorial", "Endotheliochorial", "Hemochorial"))
+
+```
+
+```{r female interbirth_interval ~ interdigitation}
+
+##FEMALE SUBSET — INTERBIRTH INTERVAL
+
+model_inter_interval_female$interdigitation <- factor(model_inter_interval_female$interdigitation, levels = c("Villous", "Trabecular", "Labyrinthine"))
+
+model_inter_interval_female$interbirth_interval <- log(model_inter_interval_female$interbirth_interval)
+model_inter_interval_female$longevity <- log(model_inter_interval_female$longevity)
+model_inter_interval_female$female_body_mass_g <- log(model_inter_interval_female$female_body_mass_g)
+
+### FEMALE BODY MASS ONLY
+# Model 1: reference = Villous
+inter_interval_female_pgls_vil <- pglsSEyPagel(
+  interbirth_interval ~ interdigitation + female_body_mass_g,
+  data = model_inter_interval_female,
+  tree = comp_phylo_interval_female$phy,
+  se = se_inter_interval_female,
+  method = "ML"
+)
+summary(inter_interval_female_pgls_vil)
+
+model_inter_interval_female$interdigitation <- relevel(model_inter_interval_female$interdigitation, ref = "Trabecular")
+
+# Model 2: reference = Trabecular
+inter_interval_female_pgls_trab <- pglsSEyPagel(
+  interbirth_interval ~ interdigitation + female_body_mass_g,
+  data = model_inter_interval_female,
+  tree = comp_phylo_interval_female$phy,
+  se = se_inter_interval_female,
+  method = "ML"
+)
+summary(inter_interval_female_pgls_trab)
+
+# Reset
+model_inter_interval_female$interdigitation <- factor(model_inter_interval_female$interdigitation, levels = c("Villous", "Trabecular", "Labyrinthine"))
+
+### LONGEVITY + FEMALE BODY MASS
+# Model 1: reference = Villous
+inter_interval_longfemale_pgls_vil <- pglsSEyPagel(
+  interbirth_interval ~ interdigitation + longevity + female_body_mass_g,
+  data = model_inter_interval_female,
+  tree = comp_phylo_interval_female$phy,
+  se = se_inter_interval_female,
+  method = "ML"
+)
+summary(inter_interval_longfemale_pgls_vil)
+
+model_inter_interval_female$interdigitation <- relevel(model_inter_interval_female$interdigitation, ref = "Trabecular")
+
+# Model 2: reference = Trabecular
+inter_interval_longfemale_pgls_trab <- pglsSEyPagel(
+  interbirth_interval ~ interdigitation + longevity + female_body_mass_g,
+  data = model_inter_interval_female,
+  tree = comp_phylo_interval_female$phy,
+  se = se_inter_interval_female,
+  method = "ML"
+)
+summary(inter_interval_longfemale_pgls_trab)
+
+# Reset
+model_inter_interval_female$interdigitation <- factor(model_inter_interval_female$interdigitation, levels = c("Villous", "Trabecular", "Labyrinthine"))
+
+```
+```{r}
+# ============================================================
+# BASELINE PGLS MODELS WITHOUT PLACENTATION
+# Allometric models for reviewer comparison
+# ============================================================
+
+
+# ------------------------------------------------------------
+# Gestation length
+# ------------------------------------------------------------
+
+ges_none_pgls <- pglsSEyPagel(
+  gestation_length ~ 1,
+  data = model_inv_ges,
+  tree = comp_phylo_ges$phy,
+  se = se_inv_ges,
+  method = "ML"
+)
+
+ges_adult_pgls <- pglsSEyPagel(
+  gestation_length ~ body_mass_g,
+  data = model_inv_ges,
+  tree = comp_phylo_ges$phy,
+  se = se_inv_ges,
+  method = "ML"
+)
+
+ges_long_pgls <- pglsSEyPagel(
+  gestation_length ~ longevity,
+  data = model_inv_ges,
+  tree = comp_phylo_ges$phy,
+  se = se_inv_ges,
+  method = "ML"
+)
+
+ges_long_adult_pgls <- pglsSEyPagel(
+  gestation_length ~ longevity + body_mass_g,
+  data = model_inv_ges,
+  tree = comp_phylo_ges$phy,
+  se = se_inv_ges,
+  method = "ML"
+)
+
+ges_female_pgls <- pglsSEyPagel(
+  gestation_length ~ female_body_mass_g,
+  data = model_inv_ges_female,
+  tree = comp_phylo_ges_female$phy,
+  se = se_inv_ges_female,
+  method = "ML"
+)
+
+
+# ------------------------------------------------------------
+# Interbirth interval
+# ------------------------------------------------------------
+
+ibi_none_pgls <- pglsSEyPagel(
+  interbirth_interval ~ 1,
+  data = model_inv_interval,
+  tree = comp_phylo_interval$phy,
+  se = se_inv_interval,
+  method = "ML"
+)
+
+ibi_adult_pgls <- pglsSEyPagel(
+  interbirth_interval ~ body_mass_g,
+  data = model_inv_interval,
+  tree = comp_phylo_interval$phy,
+  se = se_inv_interval,
+  method = "ML"
+)
+
+ibi_long_pgls <- pglsSEyPagel(
+  interbirth_interval ~ longevity,
+  data = model_inv_interval,
+  tree = comp_phylo_interval$phy,
+  se = se_inv_interval,
+  method = "ML"
+)
+
+ibi_long_adult_pgls <- pglsSEyPagel(
+  interbirth_interval ~ longevity + body_mass_g,
+  data = model_inv_interval,
+  tree = comp_phylo_interval$phy,
+  se = se_inv_interval,
+  method = "ML"
+)
+
+ibi_female_pgls <- pglsSEyPagel(
+  interbirth_interval ~ female_body_mass_g,
+  data = model_inv_interval_female,
+  tree = comp_phylo_interval_female$phy,
+  se = se_inv_interval_female,
+  method = "ML"
+)
+
+# ------------------------------------------------------------
+# Litter mass
+# ------------------------------------------------------------
+
+litmass_none_pgls <- pglsSEyPagel(
+  relative_litter_mass ~ 1,
+  data = model_inv_litter,
+  tree = comp_phylo_lit$phy,
+  se = se_inv_litter,
+  method = "ML"
+)
+
+litmass_long_pgls <- pglsSEyPagel(
+  relative_litter_mass ~ longevity,
+  data = model_inv_litter,
+  tree = comp_phylo_lit$phy,
+  se = se_inv_litter,
+  method = "ML"
+)
+
+litmass_female_pgls <- pglsSEyPagel(
+  relative_litter_mass_female ~ 1,
+  data = model_inv_litter_female,
+  tree = comp_phylo_lit_female$phy,
+  se = se_inv_litter_female,
+  method = "ML"
+)
+
+# ------------------------------------------------------------
+# Litter size#
+# ------------------------------------------------------------
+
+
+litsize_none_pgls <- pglsSEyPagel(
+  litter_size ~ 1,
+  data = model_inv_litsize,
+  tree = comp_phylo_litsize$phy,
+  se = se_inv_litsize,
+  method = "ML"
+)
+
+litsize_adult_pgls <- pglsSEyPagel(
+  litter_size ~ body_mass_g,
+  data = model_inv_litsize,
+  tree = comp_phylo_litsize$phy,
+  se = se_inv_litsize,
+  method = "ML"
+)
+
+litsize_long_pgls <- pglsSEyPagel(
+  litter_size ~ longevity,
+  data = model_inv_litsize,
+  tree = comp_phylo_litsize$phy,
+  se = se_inv_litsize,
+  method = "ML"
+)
+
+litsize_long_adult_pgls <- pglsSEyPagel(
+  litter_size ~ longevity + body_mass_g,
+  data = model_inv_litsize,
+  tree = comp_phylo_litsize$phy,
+  se = se_inv_litsize,
+  method = "ML"
+)
+
+litsize_female_pgls <- pglsSEyPagel(
+  litter_size ~ female_body_mass_g,
+  data = model_inv_litsize_female,
+  tree = comp_phylo_litsize_female$phy,
+  se = se_inv_litsize_female,
+  method = "ML"
+)
+
+# ------------------------------------------------------------
+# Neonate body size
+
+# ------------------------------------------------------------
+
+neo_none_pgls <- pglsSEyPagel(
+  neonate_over_adult ~ 1,
+  data = model_inv_neo,
+  tree = comp_phylo_neo$phy,
+  se = se_inv_neo,
+  method = "ML"
+)
+
+
+neo_long_pgls <- pglsSEyPagel(
+  neonate_over_adult ~ longevity,
+  data = model_inv_neo,
+  tree = comp_phylo_neo$phy,
+  se = se_inv_neo,
+  method = "ML"
+)
+
+neo_female_pgls <- pglsSEyPagel(
+  neonate_over_adult ~ 1,
+  data = model_inv_neo_female,
+  tree = comp_phylo_neo_female$phy,
+  se = se_inv_neo_female,
+  method = "ML"
+)
+
+#models previously missing
+
+ges_longfemale_pgls <- pglsSEyPagel(
+  gestation_length ~ longevity + female_body_mass_g,
+  data = model_inv_ges_female,
+  tree = comp_phylo_ges_female$phy,
+  se = se_inv_ges_female,
+  method = "ML"
+)
+
+ibi_longfemale_pgls <- pglsSEyPagel(
+  interbirth_interval ~ longevity + female_body_mass_g,
+  data = model_inv_interval_female,
+  tree = comp_phylo_interval_female$phy,
+  se = se_inv_interval_female,
+  method = "ML"
+)
+
+
+litsize_longfemale_pgls <- pglsSEyPagel(
+  litter_size ~ longevity + female_body_mass_g,
+  data = model_inv_litsize_female,
+  tree = comp_phylo_litsize_female$phy,
+  se = se_inv_litsize_female,
+  method = "ML"
+)
+
+```
+
+```{r R2 extraction}
+# ============================================================
+# 1. Collect model names
+# ============================================================
+
+model_names_main <- ls(
+  pattern = "^(invas|inter)_(ges|litsize|lit|neo|interval)_(none|long|adult|both|female|longfemale)_pgls_(epi|endo|hemo|vil|trab|laby)$"
+)
+
+model_names_base <- c(
+  "ges_none_pgls",
+  "ges_adult_pgls",
+  "ges_long_pgls",
+  "ges_long_adult_pgls",
+  "ges_female_pgls",
+  "ges_longfemale_pgls",
+
+  "ibi_none_pgls",
+  "ibi_adult_pgls",
+  "ibi_long_pgls",
+  "ibi_long_adult_pgls",
+  "ibi_female_pgls",
+  "ibi_longfemale_pgls",
+
+  "litmass_none_pgls",
+  "litmass_long_pgls",
+  "litmass_adult_pgls",
+  "litmass_long_adult_pgls",
+  "litmass_female_pgls",
+  "litmass_longfemale_pgls",
+
+  "litsize_none_pgls",
+  "litsize_adult_pgls",
+  "litsize_long_pgls",
+  "litsize_long_adult_pgls",
+  "litsize_female_pgls",
+  "litsize_longfemale_pgls",
+
+  "neo_none_pgls",
+  "neo_long_pgls",
+  "neo_adult_pgls",
+  "neo_long_adult_pgls",
+  "neo_female_pgls",
+  "neo_longfemale_pgls"
+)
+
+model_names_base <- model_names_base[model_names_base %in% ls()]
+
+model_names <- c(model_names_main, model_names_base)
+
+# ============================================================
+# 2. Extract lambda
+# ============================================================
+
+extract_lambda <- function(model) {
+  model_summary <- summary(model)
+
+  if (!is.null(model_summary$modelStruct$corStruct)) {
+    return(as.numeric(model_summary$modelStruct$corStruct))
+  }
+
+  NA_real_
+}
+
+# ============================================================
+# 3. Match each full model to its baseline model
+# ============================================================
+
+get_baseline_model <- function(trait, covariates) {
+
+  if (trait == "Gestation length") {
+    if (covariates == "None") return("ges_none_pgls")
+    if (covariates == "Adult body mass") return("ges_adult_pgls")
+    if (covariates == "Longevity + adult body mass") return("ges_long_adult_pgls")
+    if (covariates == "Female body mass") return("ges_female_pgls")
+    if (covariates == "Longevity + female body mass") return("ges_longfemale_pgls")
+  }
+
+  if (trait == "Interbirth interval") {
+    if (covariates == "None") return("ibi_none_pgls")
+    if (covariates == "Adult body mass") return("ibi_adult_pgls")
+    if (covariates == "Longevity + adult body mass") return("ibi_long_adult_pgls")
+    if (covariates == "Female body mass") return("ibi_female_pgls")
+    if (covariates == "Longevity + female body mass") return("ibi_longfemale_pgls")
+  }
+
+  if (trait == "Relative litter mass") {
+    if (covariates == "None") return("litmass_none_pgls")
+    if (covariates == "Longevity") return("litmass_long_pgls")
+    if (covariates == "Adult body mass") return("litmass_adult_pgls")
+    if (covariates == "Longevity + adult body mass") return("litmass_long_adult_pgls")
+    if (covariates == "Female body mass") return("litmass_female_pgls")
+    if (covariates == "Longevity + female body mass") return("litmass_longfemale_pgls")
+  }
+
+  if (trait == "Litter size") {
+    if (covariates == "None") return("litsize_none_pgls")
+    if (covariates == "Adult body mass") return("litsize_adult_pgls")
+    if (covariates == "Longevity + adult body mass") return("litsize_long_adult_pgls")
+    if (covariates == "Female body mass") return("litsize_female_pgls")
+    if (covariates == "Longevity + female body mass") return("litsize_longfemale_pgls")
+  }
+
+  if (trait == "Neonate body weight / adult body weight") {
+    if (covariates == "None") return("neo_none_pgls")
+    if (covariates == "Longevity") return("neo_long_pgls")
+    if (covariates == "Adult body mass") return("neo_adult_pgls")
+    if (covariates == "Longevity + adult body mass") return("neo_long_adult_pgls")
+    if (covariates == "Female body mass") return("neo_female_pgls")
+    if (covariates == "Longevity + female body mass") return("neo_longfemale_pgls")
+  }
+
+  return(NA_character_)
+}
+
+# ============================================================
+# 4. Compute rr2 R2_pred partial R²
+# ============================================================
+
+compute_partial_r2 <- function(model_name, trait, covariates, factor) {
+
+  if (factor == "None (allometric model)") return(NA_real_)
+
+  baseline_name <- get_baseline_model(trait, covariates)
+
+  if (is.na(baseline_name)) return(NA_real_)
+  if (!exists(baseline_name)) return(NA_real_)
+
+  model_full <- get(model_name)
+  model_base <- get(baseline_name)
+
+  if (nobs(model_full) != nobs(model_base)) {
+    warning(paste(
+      "Different nobs for", model_name, "and", baseline_name,
+      "- rr2 R2_pred set to NA"
+    ))
+    return(NA_real_)
+  }
+
+  as.numeric(rr2::R2_pred(model_full, model_base))
+}
+
+# ============================================================
+# 5. Parse model names
+# ============================================================
+
+parse_model_name <- function(model_name) {
+
+  if (model_name %in% model_names_base) {
+
+    parts <- strsplit(model_name, "_")[[1]]
+
+    trait <- dplyr::recode(
+      parts[1],
+      ges = "Gestation length",
+      ibi = "Interbirth interval",
+      litmass = "Relative litter mass",
+      litsize = "Litter size",
+      neo = "Neonate body weight / adult body weight"
+    )
+
+    covariate_code <- paste(parts[2:(length(parts) - 1)], collapse = "_")
+
+    covariates <- dplyr::recode(
+      covariate_code,
+      none = "None",
+      long = "Longevity",
+      adult = "Adult body mass",
+      long_adult = "Longevity + adult body mass",
+      female = "Female body mass",
+      longfemale = "Longevity + female body mass"
+    )
+
+    return(tibble::tibble(
+      model_name = model_name,
+      factor = "None (allometric model)",
+      trait = trait,
+      covariates = covariates,
+      reference = NA_character_
+    ))
+  }
+
+  parts <- strsplit(model_name, "_")[[1]]
+
+  tibble::tibble(
+    model_name = model_name,
+
+    factor = dplyr::recode(
+      parts[1],
+      invas = "Invasiveness",
+      inter = "Interdigitation"
+    ),
+
+    trait = dplyr::recode(
+      parts[2],
+      ges = "Gestation length",
+      litsize = "Litter size",
+      lit = "Relative litter mass",
+      neo = "Neonate body weight / adult body weight",
+      interval = "Interbirth interval"
+    ),
+
+    covariates = dplyr::recode(
+      parts[3],
+      none = "None",
+      long = "Longevity",
+      adult = "Adult body mass",
+      both = "Longevity + adult body mass",
+      female = "Female body mass",
+      longfemale = "Longevity + female body mass"
+    ),
+
+    reference = dplyr::recode(
+      parts[5],
+      epi = "Epitheliochorial",
+      endo = "Endotheliochorial",
+      hemo = "Hemochorial",
+      vil = "Villous",
+      trab = "Trabecular",
+      laby = "Labyrinthine"
+    )
+  )
+}
+
+model_metadata <- dplyr::bind_rows(
+  lapply(model_names, parse_model_name)
+)
+
+# ============================================================
+# 6. Build model summary table using rr2::R2_pred
+# ============================================================
+
+# Build table first WITHOUT R2
+pgls_summary_table <- dplyr::bind_rows(
+  lapply(model_names, function(model_name) {
+
+    model <- get(model_name)
+
+    tibble::tibble(
+      model_name = model_name,
+      AIC = AIC(model),
+      BIC = BIC(model),
+      Lambda = extract_lambda(model),
+      logLik = as.numeric(logLik(model))
+    )
+  })
+) %>%
+  dplyr::left_join(model_metadata, by = "model_name") %>%
+  dplyr::select(
+    model_name,
+    trait,
+    factor,
+    reference,
+    covariates,
+    AIC,
+    BIC,
+    Lambda,
+    logLik
+  )
+
+# Add empty columns
+pgls_summary_table$baseline_model <- NA_character_
+pgls_summary_table$partial_R2 <- NA_real_
+
+# Compute rr2 R2_pred with progress messages
+for (i in seq_len(nrow(pgls_summary_table))) {
+
+  message(
+    "\n[", i, "/", nrow(pgls_summary_table), "] ",
+    pgls_summary_table$model_name[i]
+  )
+
+  this_model <- pgls_summary_table$model_name[i]
+  this_trait <- pgls_summary_table$trait[i]
+  this_covariates <- pgls_summary_table$covariates[i]
+  this_factor <- pgls_summary_table$factor[i]
+
+  baseline_name <- get_baseline_model(
+    trait = this_trait,
+    covariates = this_covariates
+  )
+
+  pgls_summary_table$baseline_model[i] <- baseline_name
+
+  if (this_factor == "None (allometric model)") {
+    message("  baseline/allometric row: partial_R2 = NA")
+    next
+  }
+
+  if (is.na(baseline_name) || !exists(baseline_name)) {
+    message("  no baseline model found: partial_R2 = NA")
+    next
+  }
+
+  model_full <- get(this_model)
+  model_base <- get(baseline_name)
+
+  if (nobs(model_full) != nobs(model_base)) {
+    message(
+      "  different nobs: ",
+      nobs(model_full), " vs ", nobs(model_base),
+      " — partial_R2 = NA"
+    )
+    next
+  }
+
+  message("  baseline: ", baseline_name)
+
+  r2_value <- tryCatch(
+    {
+      rr2::R2_pred(model_full, model_base)
+    },
+    error = function(e) {
+      message("  ERROR: ", e$message)
+      NA_real_
+    }
+  )
+
+  pgls_summary_table$partial_R2[i] <- as.numeric(r2_value)
+
+  message("  partial_R2 = ", pgls_summary_table$partial_R2[i])
+
+  # Save progress after every model
+  write.csv(
+    pgls_summary_table,
+    "pgls_summary_table_rr2.csv",
+    row.names = FALSE
+  )
+}
+
+```
+
+```{r pPCA and pPCA PGLS}
+
+``` {r pPCA}
+
+# Build pPCA dataset: drop litter_mass, use relative neonate size
+library(dplyr)
+library(phytools)
+
+# Build pPCA dataset: drop litter_mass, use relative neonate size
+ppca_data <- common_species_new_data %>%
+  dplyr::select(
+    species,
+    gestation_length,
+    interbirth_interval,
+    litter_size,
+    neonate_body_size,
+    body_mass_g,
+    longevity,
+    invasiveness,
+    interdigitation
+  ) %>%
+  dplyr::filter(
+    !is.na(gestation_length),
+    !is.na(interbirth_interval),
+    !is.na(litter_size),
+    !is.na(neonate_body_size),
+    !is.na(body_mass_g),
+    !is.na(longevity),
+    gestation_length > 0,
+    interbirth_interval > 0,
+    litter_size > 0,
+    neonate_body_size > 0,
+    body_mass_g > 0,
+    longevity > 0
+  ) %>%
+  dplyr::mutate(
+    log_neonate_body_size = log(neonate_body_size),
+    log_gestation_length = log(gestation_length),
+    log_interbirth_interval = log(interbirth_interval),
+    log_litter_size = log(litter_size),
+    log_body_mass_g = log(body_mass_g),
+    log_longevity = log(longevity)
+  )
+
+#Check rows N
+nrow(ppca_data)
+
+ppca_tree <- ape::keep.tip(
+  neotree,
+  ppca_data$species
+)
+
+#Check if tree tip match with data
+ppca_data <- ppca_data %>%
+  dplyr::filter(species %in% ppca_tree$tip.label)
+
+ppca_data <- ppca_data[
+  match(ppca_tree$tip.label, ppca_data$species),
+]
+
+identical(ppca_tree$tip.label, ppca_data$species)
+
+#pPCA matrix generation
+ppca_matrix <- ppca_data %>%
+  dplyr::select(
+    log_gestation_length,
+    log_interbirth_interval,
+    log_litter_size,
+    log_neonate_body_size
+  ) %>%
+  as.matrix()
+
+rownames(ppca_matrix) <- ppca_data$species
+
+#Now I run the phylogenetic PCA
+ppca_result <- phytools::phyl.pca(
+  ppca_tree,
+  ppca_matrix,
+  method = "lambda",
+  mode = "corr"
+)
+
+#Inspect pPCA
+ppca_result$Eval / sum(ppca_result$Eval)
+ppca_result$Evec
+
+#Save pPCA scores
+
+ppca_loadings <- as.data.frame(ppca_result$L)
+ppca_loadings$trait <- rownames(ppca_loadings)
+
+evals <- diag(ppca_result$Eval)
+
+ppca_variance <- data.frame(
+  PC = names(evals),
+  eigenvalue = as.numeric(evals),
+  proportion_variance = as.numeric(evals / sum(evals)),
+  cumulative_variance = cumsum(as.numeric(evals / sum(evals)))
+)
+
+ppca_variance
+
+ppca_scores <- as.data.frame(ppca_result$S)
+ppca_scores$species <- rownames(ppca_scores)
+
+ppca_scores <- ppca_scores %>%
+  dplyr::left_join(
+    ppca_data %>%
+      dplyr::select(
+        species,
+        invasiveness,
+        interdigitation,
+        log_body_mass_g,
+        log_longevity
+      ),
+    by = "species"
+  )
+
+colnames(ppca_scores)
+
+
+
+#Check for NA
+head(ppca_scores)
+colSums(is.na(ppca_scores))
+
+
+#Clean loading labels for plotting
+ppca_loadings_plot <- ppca_loadings %>%
+  dplyr::mutate(
+    trait_label = dplyr::recode(
+      trait,
+      log_gestation_length = "Gestation length",
+      log_interbirth_interval = "Interbirth interval",
+      log_litter_size = "Litter size",
+      log_neonate_body_size = "Neonate size"
+    )
+  )
+
+
+#Create pPCA biplot with trait-loading arrows
+arrow_multiplier <- 0.8 * max(
+  abs(ppca_scores$PC1),
+  abs(ppca_scores$PC2),
+  na.rm = TRUE
+)
+
+ppca_biplot_interdigitation <- ggplot2::ggplot() +
+  ggplot2::geom_point(
+    data = ppca_scores,
+    ggplot2::aes(
+      x = PC1,
+      y = PC2,
+      color = interdigitation
+    ),
+    alpha = 0.6,
+    size = 2
+  ) +
+  ggplot2::geom_segment(
+    data = ppca_loadings_plot,
+    ggplot2::aes(
+      x = 0,
+      y = 0,
+      xend = PC1 * arrow_multiplier,
+      yend = PC2 * arrow_multiplier
+    ),
+    arrow = grid::arrow(length = grid::unit(0.25, "cm")),
+    linewidth = 0.9,
+    color = "black"
+  ) +
+  ggplot2::geom_text(
+    data = ppca_loadings_plot,
+    ggplot2::aes(
+      x = PC1 * arrow_multiplier * 1.12,
+      y = PC2 * arrow_multiplier * 1.12,
+      label = trait_label
+    ),
+    size = 3.8,
+    color = "black"
+  ) +
+  ggplot2::geom_hline(
+    yintercept = 0,
+    linetype = "dashed",
+    linewidth = 0.3
+  ) +
+  ggplot2::geom_vline(
+    xintercept = 0,
+    linetype = "dashed",
+    linewidth = 0.3
+  ) +
+  ggplot2::theme_minimal(base_size = 14) +
+  ggplot2::labs(
+    title = "Phylogenetic PCA biplot of life-history traits",
+    x = paste0(
+      "pPC1 (",
+      round(ppca_variance$proportion_variance[1] * 100, 1),
+      "%)"
+    ),
+    y = paste0(
+      "pPC2 (",
+      round(ppca_variance$proportion_variance[2] * 100, 1),
+      "%)"
+    ),
+    color = "Interdigitation"
+  ) +
+  ggplot2::theme(
+    panel.grid.minor = ggplot2::element_blank(),
+    plot.title = ggplot2::element_text(face = "bold")
+  )
+
+print(ppca_biplot_interdigitation)
+
+ggplot2::ggsave(
+  "ppca_biplot_interdigitation.png",
+  ppca_biplot_interdigitation,
+  width = 8,
+  height = 6,
+  dpi = 300
+)
+
+#Same pPCA biplot, colored by invasiveness
+ppca_biplot_invasiveness <- ggplot2::ggplot() +
+  ggplot2::geom_point(
+    data = ppca_scores,
+    ggplot2::aes(
+      x = PC1,
+      y = PC2,
+      color = invasiveness
+    ),
+    alpha = 0.6,
+    size = 2
+  ) +
+  ggplot2::geom_segment(
+    data = ppca_loadings_plot,
+    ggplot2::aes(
+      x = 0,
+      y = 0,
+      xend = PC1 * arrow_multiplier,
+      yend = PC2 * arrow_multiplier
+    ),
+    arrow = grid::arrow(length = grid::unit(0.25, "cm")),
+    linewidth = 0.9,
+    color = "black"
+  ) +
+  ggplot2::geom_text(
+    data = ppca_loadings_plot,
+    ggplot2::aes(
+      x = PC1 * arrow_multiplier * 1.12,
+      y = PC2 * arrow_multiplier * 1.12,
+      label = trait_label
+    ),
+    size = 3.8,
+    color = "black"
+  ) +
+  ggplot2::geom_hline(
+    yintercept = 0,
+    linetype = "dashed",
+    linewidth = 0.3
+  ) +
+  ggplot2::geom_vline(
+    xintercept = 0,
+    linetype = "dashed",
+    linewidth = 0.3
+  ) +
+  ggplot2::theme_minimal(base_size = 14) +
+  ggplot2::labs(
+    title = "Phylogenetic PCA biplot of life-history traits",
+    x = paste0(
+      "pPC1 (",
+      round(ppca_variance$proportion_variance[1] * 100, 1),
+      "%)"
+    ),
+    y = paste0(
+      "pPC2 (",
+      round(ppca_variance$proportion_variance[2] * 100, 1),
+      "%)"
+    ),
+    color = "Invasiveness"
+  ) +
+  ggplot2::theme(
+    panel.grid.minor = ggplot2::element_blank(),
+    plot.title = ggplot2::element_text(face = "bold")
+  )
+
+print(ppca_biplot_invasiveness)
+
+ggplot2::ggsave(
+  "ppca_biplot_invasiveness.png",
+  ppca_biplot_invasiveness,
+  width = 8,
+  height = 6,
+  dpi = 300
+)
+
+
+#Export pPCA plots
+ggplot2::ggsave(
+  "ppca_biplot_interdigitation.png",
+  ppca_biplot_interdigitation,
+  width = 8,
+  height = 6,
+  dpi = 300
+)
+
+
+
+#Export pPCA tables
+
+ppca_eigenvalues <- diag(ppca_result$Eval)
+
+ppca_variance <- data.frame(
+  PC = paste0("PC", seq_along(ppca_eigenvalues)),
+  eigenvalue = as.numeric(ppca_eigenvalues),
+  proportion_variance = as.numeric(ppca_eigenvalues / sum(ppca_eigenvalues)),
+  cumulative_variance = cumsum(
+    as.numeric(ppca_eigenvalues / sum(ppca_eigenvalues))
+  )
+)
+
+ppca_variance
+
+ppca_loadings <- as.data.frame(ppca_result$Evec) %>%
+  tibble::rownames_to_column("trait")
+
+ppca_loadings
+
+
+write.csv(ppca_loadings, "ppca_loadings.csv", row.names = FALSE)
+write.csv(ppca_variance, "ppca_variance_explained.csv", row.names = FALSE)
+write.csv(ppca_scores, "ppca_scores.csv", row.names = FALSE)
+
+
+library(openxlsx)
+
+# Create workbook
+ppca_workbook <- openxlsx::createWorkbook()
+
+# Add sheets
+openxlsx::addWorksheet(ppca_workbook, "pPCA_loadings")
+openxlsx::addWorksheet(ppca_workbook, "pPCA_variance")
+openxlsx::addWorksheet(ppca_workbook, "pPCA_scores")
+
+# Write data
+openxlsx::writeData(
+  ppca_workbook,
+  sheet = "pPCA_loadings",
+  x = ppca_loadings
+)
+
+openxlsx::writeData(
+  ppca_workbook,
+  sheet = "pPCA_variance",
+  x = ppca_variance
+)
+
+openxlsx::writeData(
+  ppca_workbook,
+  sheet = "pPCA_scores",
+  x = ppca_scores
+)
+
+# Save workbook
+openxlsx::saveWorkbook(
+  ppca_workbook,
+  file = "pPCA_results.xlsx",
+  overwrite = TRUE
+)
+
+
+
+#Now PGLS on pPCA
+rownames(ppca_scores) <- ppca_scores$species
+
+se_ppca <- rep(0.01, nrow(ppca_scores))
+names(se_ppca) <- rownames(ppca_scores)
+
+inter_ppca_pgls_vil <- pglsSEyPagel(
+  PC1 ~ interdigitation,
+  data = ppca_scores,
+  tree = ppca_tree,
+  se = se_ppca,
+  method = "ML"
+)
+
+invas_ppca_pgls_epi <- pglsSEyPagel(
+  PC1 ~ invasiveness,
+  data = ppca_scores,
+  tree = ppca_tree,
+  se = se_ppca,
+  method = "ML"
+)
+
+inter_ppca_pgls_adult_vil <- pglsSEyPagel(
+  PC1 ~ interdigitation + log_body_mass_g,
+  data = ppca_scores,
+  tree = ppca_tree,
+  se = se_ppca,
+  method = "ML"
+)
+
+invas_ppca_pgls_adult_epi <- pglsSEyPagel(
+  PC1 ~ invasiveness + log_body_mass_g,
+  data = ppca_scores,
+  tree = ppca_tree,
+  se = se_ppca,
+  method = "ML"
+)
+
+inter_ppca_pgls_long_vil <- pglsSEyPagel(
+  PC1 ~ interdigitation + log_longevity,
+  data = ppca_scores,
+  tree = ppca_tree,
+  se = se_ppca,
+  method = "ML"
+)
+
+invas_ppca_pgls_long_epi <- pglsSEyPagel(
+  PC1 ~ invasiveness + log_longevity,
+  data = ppca_scores,
+  tree = ppca_tree,
+  se = se_ppca,
+  method = "ML"
+)
+
+inter_ppca_pgls_both_vil <- pglsSEyPagel(
+  PC1 ~ interdigitation + log_longevity + log_body_mass_g,
+  data = ppca_scores,
+  tree = ppca_tree,
+  se = se_ppca,
+  method = "ML"
+)
+
+invas_ppca_pgls_both_epi <- pglsSEyPagel(
+  PC1 ~ invasiveness + log_longevity + log_body_mass_g,
+  data = ppca_scores,
+  tree = ppca_tree,
+  se = se_ppca,
+  method = "ML"
+)
+
+summary(inter_ppca_pgls_vil)
+
+summary(invas_ppca_pgls_epi)
+
+summary(inter_ppca_pgls_adult_vil)
+
+summary(invas_ppca_pgls_adult_epi)
+
+summary(inter_ppca_pgls_long_vil)
+
+summary(invas_ppca_pgls_long_epi)
+
+summary(inter_ppca_pgls_both_vil)
+
+summary(invas_ppca_pgls_both_epi)
+
+
+```
