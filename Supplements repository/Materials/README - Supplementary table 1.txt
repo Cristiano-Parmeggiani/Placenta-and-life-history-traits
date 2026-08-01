@@ -1,4 +1,4 @@
-FILE: pgls_tables.xlxs
+FILE: Supplementary Table 1.xlxs
 
 Sheet name: Model summary
 
@@ -27,9 +27,6 @@ Akaike Information Criterion. Lower values indicate better model fit.
 
 Lambda
 Estimated Pagel’s lambda, measuring phylogenetic signal in model residuals.
-
-logLik
-Log-likelihood of the fitted model.
 
 baseline_model
 The name of the allometric model used as a contrast to calculate partial R2.
@@ -70,11 +67,6 @@ Standard error of the regression coefficient estimate.
 p_value
 Probability value testing the null hypothesis that the coefficient equals zero.
 
-Placenta and LH traits
-Identifier specifying which life history trait and placental morphology variable were included in the model.
-
-Examples:
-neonate_invasiveness = inter_ges_adult_pgls_trab = model testing the interdigitation effect on gestation length using the trabecular type as reference
 
 Note:
 Models were fitted using phylogenetic generalized least squares with Pagel’s lambda estimated by maximum likelihood.
