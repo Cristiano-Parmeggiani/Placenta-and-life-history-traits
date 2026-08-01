@@ -14,10 +14,10 @@ Number of species in the dataset exhibiting this placental morphology combinatio
 
 Rarity
 Qualitative classification of frequency:
-Common: widespread across species
-Rare: present in relatively few species
-Very rare: present in extremely few species
-Absent: not observed in dataset
+Common: (>100 species)
+Moderately common: (50–100)
+Uncommon: (20–49)
+Rare: (1–19).
 
 Orders Most Represented
 Taxonomic orders containing species with this placental morphology combination, listed in descending order of representation.
