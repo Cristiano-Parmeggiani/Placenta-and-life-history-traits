@@ -1,4 +1,4 @@
-FILE: Supplementary Table 1.xlxs
+FILE: Supplementary Table 1.csv
 
 Sheet name: Model summary
 
