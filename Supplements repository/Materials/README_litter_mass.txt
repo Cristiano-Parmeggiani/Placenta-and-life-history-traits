@@ -37,3 +37,9 @@ Ratio of litter mass over adult body mass
 
 relative_litter_mass_female
 Ration of litter mass over female body mass
+
+litter_size
+Average litter size of the species (units)
+
+neonate_body_size
+Average neonate body size of the species (grams)
