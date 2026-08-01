@@ -1,4 +1,4 @@
-FILE: pPCA_results_with_PGLS.xlsx
+FILE: pPCA_results_with_PGLS.csv
 
 Sheet name: pPCA_variance
 
