@@ -1,10 +1,10 @@
-Invasiveness;Interdigitation;n species;Rarity;Orders Most Represented
-Epitheliochorial;Villous;151;Common;Artiodactyla (117), Primates (24), Perissodactyla (10)
-Epitheliochorial;Trabecular;2;Very rare;Perissodactyla (2)
+invasiveness;interdigitation;n species;Rarity;Orders Most Represented
+Epitheliochorial;Villous;143;Common;Artiodactyla (109), Primates (24), Perissodactyla (10)
+Epitheliochorial;Trabecular;10;Rare;Artiodactyla (8), Perissodactyla (2)
 Epitheliochorial;Labyrinthine;0;Absent;NA
 Endotheliochorial;Villous;0;Absent;NA
-Endotheliochorial;Trabecular;6;Rare;Pilosa (5), Cingulata (1)
-Endotheliochorial;Labyrinthine;127;Common;Carnivora (90), Chiroptera (16), Scandentia (11), Rodentia (4), Proboscidea (2), others (1 each: Pilosa, Tubulidentata, Sirenia, Eulipotyphla)
-Hemochorial;Villous;30;Uncommon;Primates (26), Rodentia (3), Hyracoidea (1)
-Hemochorial;Trabecular;56;Moderately common;Primates (48), Cingulata (5), Pilosa (3)
-Hemochorial;Labyrinthine;137;Common;Rodentia (85), Chiroptera (16), Eulipotyphla (9), Afrosoricida (7), Lagomorpha (8), Macroscelidea (6), Carnivora (2), others (1 each: Hyracoidea, Scandentia, Primates, Dermoptera)
+Endotheliochorial;Trabecular;4;Rare;Pilosa (3), others (1 each: Cingulata)
+Endotheliochorial;Labyrinthine;127;Common;Carnivora (89), Chiroptera (15), Scandentia (11), Rodentia (4), Pilosa (3), Proboscidea (2), others (1 each: Eulipotyphla, Sirenia, Tubulidentata)
+Hemochorial;Villous;23;Uncommon;Primates (20), Rodentia (3)
+Hemochorial;Trabecular;62;Moderately common;Primates (54), Cingulata (5), Pilosa (3)
+Hemochorial;Labyrinthine;140;Common;Rodentia (86), Chiroptera (17), Eulipotyphla (9), Lagomorpha (8), Afrosoricida (7), Macroscelidea (6), Carnivora (2), Hyracoidea (2), others (1 each: Dermoptera, Primates, Scandentia)
