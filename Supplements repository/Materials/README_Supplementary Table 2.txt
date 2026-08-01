@@ -4,7 +4,7 @@ Description: This csv contains our data collection for placenta types, with refe
 
 Column definitions:
 species
-Scientific species name
+Scientific name of the species
 
 order
 Taxonomic order of the species
