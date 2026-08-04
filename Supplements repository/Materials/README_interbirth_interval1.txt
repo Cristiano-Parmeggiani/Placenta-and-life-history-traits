@@ -1,4 +1,4 @@
-FILE:interbirth_interval.csv
+FILE:interbirth_interval1.csv
 Description: This csv contains interbirth intervals raw data used for the analysis. Each row represents a species, and each column represents a numerical or categorical variable.
 
 Variables:
